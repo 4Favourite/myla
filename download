@@ -1,0 +1,35 @@
+# Secrets: never commit these. This repository is public.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.jks
+*.keystore
+secrets/
+google-services.json
+
+# Supabase local state
+supabase/.temp/
+supabase/.branches/
+
+# Web
+node_modules/
+.next/
+out/
+dist/
+.vercel/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
