@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phase 1 (database) is done. Phase 2 (text dashboard: sign in, add and complete tasks) is in progress.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phase 3a (chat with Myla, no tools yet) is in progress.
 
 ## Principles
 
@@ -18,6 +18,7 @@ A personal AI assistant for one person: tasks, reminders and daily planning with
 ```
 supabase/migrations/   database schema (Phase 1)
 web/                   the Today dashboard (Phase 2): Vite, React, TypeScript
+supabase/functions/    backend functions (Phase 3): chat
 ```
 
 The dashboard is plain static files that talk straight to Supabase. That lets the same code run in a browser on desktop now and inside the Android app later.
@@ -54,14 +55,24 @@ Open the address it prints (usually http://localhost:5173), sign in with the use
 
 Keys: `web/.env` holds only the project URL and the anon/publishable key. It is ignored by git. Never put the service role (secret) key anywhere in `web/`.
 
+## Phase 3a: chat with Myla
+
+The `chat` function (`supabase/functions/chat/index.ts`) checks you are signed in, saves your message, asks the AI model (Groq) for a reply, saves it, and returns it. It has no tools yet, so Myla cannot see or change tasks; the system prompt tells her to say so.
+
+Setup, all in the Supabase dashboard (nothing secret goes in the repo):
+
+1. Add a function secret named `GROQ_API_KEY` (Edge Functions, Secrets). Optionally add `GROQ_MODEL` to change the model without changing code.
+2. Create an Edge Function named exactly `chat` and paste in the code from `supabase/functions/chat/index.ts`.
+3. Turn off the function's JWT verification setting. The code verifies the signed-in user itself.
+
 ## Roadmap
 
 Each phase is small, tested on its own, and approved before the next begins.
 
 - **Phase 0, feasibility tests (needs Android Studio):** prove on the real phone that a voice service survives being minimized and that a reminder fires on time with the app closed.
 - **Phase 1, database foundation:** done.
-- **Phase 2, text dashboard:** in progress.
-- **Phase 3, orchestrator:** the backend that talks to the AI model, the tool registry, and the audit log.
+- **Phase 2, text dashboard:** done.
+- **Phase 3, orchestrator:** 3a chat only (this step), 3b read-only task tool plus audit log, 3c task-changing tools with confirmation.
 - **Phase 4, Android app:** native shell, local reminder alarms, push.
 - **Phase 5, memory and proactive jobs:** memory screen, morning summary, nudges.
 - **Phase 6, voice and minimized operation.**

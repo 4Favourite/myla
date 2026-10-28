@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { configError, supabase } from './lib/supabase'
@@ -160,19 +160,35 @@ function Dashboard({ email }: { email: string }) {
     event.preventDefault()
     const title = newTitle.trim()
     if (!title) return
-    setSaving(true)
-    const { error: insertError } = await supabase.from('tasks').insert({
-      title,
-      due_at: newDue ? new Date(newDue).toISOString() : null,
-    })
-    if (insertError) {
-      setError(`Could not save the task: ${insertError.message}`)
-    } else {
-      setNewTitle('')
-      setNewDue('')
-      await load()
+
+    // Check the date first. A mistyped year (for example five digits) used to
+    // break saving and leave the button stuck on "Saving...".
+    let dueAt: string | null = null
+    if (newDue) {
+      const parsed = new Date(newDue)
+      const year = parsed.getFullYear()
+      if (Number.isNaN(parsed.getTime()) || year < 2000 || year > 2100) {
+        setError('That due date does not look right. Check that the year has four digits, or clear the date.')
+        return
+      }
+      dueAt = parsed.toISOString()
     }
-    setSaving(false)
+
+    setSaving(true)
+    try {
+      const { error: insertError } = await supabase.from('tasks').insert({ title, due_at: dueAt })
+      if (insertError) {
+        setError(`Could not save the task: ${insertError.message}`)
+      } else {
+        setNewTitle('')
+        setNewDue('')
+        await load()
+      }
+    } catch (caught) {
+      setError(`Could not save the task: ${caught instanceof Error ? caught.message : 'unknown error'}`)
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function toggleTask(task: Task) {
@@ -269,6 +285,8 @@ function Dashboard({ email }: { email: string }) {
         <input
           aria-label="Due date and time (optional)"
           type="datetime-local"
+          min="2000-01-01T00:00"
+          max="2100-12-31T23:59"
           value={newDue}
           onChange={(e) => setNewDue(e.target.value)}
         />
@@ -294,6 +312,8 @@ function Dashboard({ email }: { email: string }) {
           <Section title="Done recently" tasks={groups.done} onToggle={toggleTask} onDelete={deleteTask} />
         </>
       )}
+
+      <Chat />
 
       <p className="muted small updated">
         {loadedAt
@@ -346,6 +366,166 @@ function Section({ title, tasks, emptyText, overdue, onToggle, onDelete }: Secti
           ))}
         </ul>
       )}
+    </section>
+  )
+}
+
+type ChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+}
+
+// When the chat function says no, it explains why in a JSON message. Show that.
+async function describeFunctionError(err: unknown): Promise<string> {
+  if (err && typeof err === 'object' && 'context' in err) {
+    const context = (err as { context?: unknown }).context
+    if (context instanceof Response) {
+      try {
+        const body = await context.json()
+        if (body && typeof body.error === 'string') return body.error
+      } catch {
+        // fall through to the generic message
+      }
+    }
+  }
+  return err instanceof Error ? err.message : 'Something went wrong.'
+}
+
+function Chat() {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [conversationId, setConversationId] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
+  const [ready, setReady] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+
+  // Load the latest conversation from the database.
+  useEffect(() => {
+    let cancelled = false
+    async function loadHistory() {
+      const { data: convo, error: convoError } = await supabase
+        .from('conversations')
+        .select('id')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (cancelled) return
+      if (convoError) {
+        setError(`Could not load the conversation: ${convoError.message}`)
+        setReady(true)
+        return
+      }
+      if (convo) {
+        const { data: rows, error: rowsError } = await supabase
+          .from('messages')
+          .select('id, role, content')
+          .eq('conversation_id', convo.id)
+          .in('role', ['user', 'assistant'])
+          .order('created_at', { ascending: true })
+          .limit(100)
+        if (cancelled) return
+        if (rowsError) {
+          setError(`Could not load the messages: ${rowsError.message}`)
+        } else {
+          setConversationId(convo.id as string)
+          setMessages((rows ?? []) as ChatMessage[])
+        }
+      }
+      setReady(true)
+    }
+    void loadHistory()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Keep the newest message in view inside the chat box (the page does not jump).
+  useEffect(() => {
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages, sending])
+
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const text = draft.trim()
+    if (!text || sending) return
+    setSending(true)
+    setError(null)
+    const pendingId = `pending-${Date.now()}`
+    setMessages((current) => [...current, { id: pendingId, role: 'user', content: text }])
+    setDraft('')
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('chat', {
+        body: { message: text, conversation_id: conversationId },
+      })
+      if (invokeError) {
+        // Put the message back so nothing is lost, and say what went wrong.
+        setMessages((current) => current.filter((m) => m.id !== pendingId))
+        setDraft(text)
+        setError(await describeFunctionError(invokeError))
+        return
+      }
+      const result = data as { reply?: string; conversation_id?: string } | null
+      if (!result?.reply) {
+        setMessages((current) => current.filter((m) => m.id !== pendingId))
+        setDraft(text)
+        setError('Myla did not send a reply.')
+        return
+      }
+      const replyText = result.reply
+      if (result.conversation_id) setConversationId(result.conversation_id)
+      setMessages((current) => [
+        ...current,
+        { id: `reply-${Date.now()}`, role: 'assistant', content: replyText },
+      ])
+    } catch (caught) {
+      setMessages((current) => current.filter((m) => m.id !== pendingId))
+      setDraft(text)
+      setError(caught instanceof Error ? caught.message : 'Something went wrong.')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <section className="section">
+      <h2>Talk to Myla</h2>
+      <p className="muted small">Myla can chat for now. She cannot see or change your tasks yet.</p>
+      <div className="card chat">
+        <div className="chat-list" ref={listRef}>
+          {!ready ? (
+            <p className="muted">Loading…</p>
+          ) : messages.length === 0 ? (
+            <p className="muted">Say hello to start.</p>
+          ) : (
+            messages.map((m) => (
+              <div key={m.id} className={`bubble ${m.role}`}>
+                {m.content}
+              </div>
+            ))
+          )}
+          {sending && <div className="bubble assistant muted">Myla is thinking…</div>}
+        </div>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        <form className="chat-form" onSubmit={send}>
+          <input
+            aria-label="Message Myla"
+            placeholder="Message Myla…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            disabled={sending}
+          />
+          <button className="btn" type="submit" disabled={sending || !draft.trim()}>
+            Send
+          </button>
+        </form>
+      </div>
     </section>
   )
 }

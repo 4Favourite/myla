@@ -230,3 +230,45 @@ button:focus-visible {
 .updated {
   text-align: center;
 }
+
+.chat {
+  display: grid;
+  gap: 10px;
+}
+
+.chat-list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.bubble {
+  padding: 8px 12px;
+  border-radius: 12px;
+  max-width: 85%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bubble.user {
+  justify-self: end;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.bubble.assistant {
+  justify-self: start;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.chat-form {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-form input {
+  flex: 1;
+}
