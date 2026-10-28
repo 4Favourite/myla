@@ -2,11 +2,11 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phase 1 (database foundation) only. Nothing else is built yet.
+**Status:** Phase 1 (database) is done. Phase 2 (text dashboard: sign in, add and complete tasks) is in progress.
 
 ## Principles
 
-- Myla never claims to have done something unless a recorded tool result confirms it.
+- Myla never claims to have done something unless a recorded result confirms it.
 - Suggesting is not executing. Consequential actions need an explicit yes.
 - Content from messages, email and web pages is data, never instructions.
 - Minimum permissions, granted one capability at a time.
@@ -17,51 +17,50 @@ A personal AI assistant for one person: tasks, reminders and daily planning with
 
 ```
 supabase/migrations/   database schema (Phase 1)
+web/                   the Today dashboard (Phase 2): Vite, React, TypeScript
 ```
 
-Folders for the Android app and the web dashboard are added in later phases.
+The dashboard is plain static files that talk straight to Supabase. That lets the same code run in a browser on desktop now and inside the Android app later.
 
-## Phase 1 setup
+## Phase 1: database
 
-You need only a browser for this phase.
-
-1. Create a new Supabase project on the free plan, for example named `myla`.
-2. In the project's Authentication settings, turn off new user sign-ups, then add your own user with an email and password. (Menu names can differ slightly between Supabase versions.)
-3. Open the SQL Editor, paste the contents of `supabase/migrations/0001_core_schema.sql`, and run it once.
-4. Run the verification queries below.
-5. Keep keys out of git: copy `.env.example` to `.env` on your own machine when a later phase needs it.
-
-## Verify Phase 1
-
-Run both in the SQL Editor.
+See `supabase/migrations/0001_core_schema.sql`. Run it once in the Supabase SQL Editor. Check it with:
 
 ```sql
--- 9 tables, and row level security should be true for every one
-select tablename, rowsecurity
-from pg_tables
-where schemaname = 'public'
-order by tablename;
-
--- 9 policies: eight "owner full access" and one "owner can read" on tool_calls
-select tablename, policyname, cmd, roles
-from pg_policies
-where schemaname = 'public'
-order by tablename, cmd;
+select tablename, rowsecurity from pg_tables where schemaname = 'public' order by tablename;
+select tablename, policyname, cmd, roles from pg_policies where schemaname = 'public' order by tablename, cmd;
 ```
 
-Optional outside check: a request to the tasks table using only the public (anon) key should return an error or an empty list, never rows.
+Expect 9 tables with row level security true, and 9 policies.
+
+## Phase 2: run the dashboard
+
+You need Node.js (LTS) and Git. Run these from the repository folder on your own computer.
 
 ```
-curl "$SUPABASE_URL/rest/v1/tasks?select=*" -H "apikey: $SUPABASE_ANON_KEY"
+npm create vite@latest web -- --template react-ts
+cd web
+npm install
+npm install @supabase/supabase-js
 ```
+
+Then copy in the Phase 2 files (replace `src/App.tsx`, `src/App.css`, `src/index.css`; add `src/lib/supabase.ts` and `.env.example`), create `web/.env` from `web/.env.example`, and start it:
+
+```
+npm run dev
+```
+
+Open the address it prints (usually http://localhost:5173), sign in with the user you created in Supabase, and add a task.
+
+Keys: `web/.env` holds only the project URL and the anon/publishable key. It is ignored by git. Never put the service role (secret) key anywhere in `web/`.
 
 ## Roadmap
 
 Each phase is small, tested on its own, and approved before the next begins.
 
-- **Phase 0, feasibility tests (runs alongside Phase 1, needs Android Studio):** prove on the real phone that a voice service survives being minimized and that a reminder fires on time with the app closed.
-- **Phase 1, database foundation:** this commit.
-- **Phase 2, text dashboard:** sign in, add and complete tasks.
+- **Phase 0, feasibility tests (needs Android Studio):** prove on the real phone that a voice service survives being minimized and that a reminder fires on time with the app closed.
+- **Phase 1, database foundation:** done.
+- **Phase 2, text dashboard:** in progress.
 - **Phase 3, orchestrator:** the backend that talks to the AI model, the tool registry, and the audit log.
 - **Phase 4, Android app:** native shell, local reminder alarms, push.
 - **Phase 5, memory and proactive jobs:** memory screen, morning summary, nudges.
