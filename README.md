@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phase 3a (chat with Myla, no tools yet) is in progress.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phase 3a (chat) is done. Phase 3b (read-only task tool plus activity log) is in progress.
 
 ## Principles
 
@@ -55,9 +55,11 @@ Open the address it prints (usually http://localhost:5173), sign in with the use
 
 Keys: `web/.env` holds only the project URL and the anon/publishable key. It is ignored by git. Never put the service role (secret) key anywhere in `web/`.
 
-## Phase 3a: chat with Myla
+## Phase 3: chat with Myla
 
-The `chat` function (`supabase/functions/chat/index.ts`) checks you are signed in, saves your message, asks the AI model (Groq) for a reply, saves it, and returns it. It has no tools yet, so Myla cannot see or change tasks; the system prompt tells her to say so.
+The `chat` function (`supabase/functions/chat/index.ts`) checks you are signed in, saves your message, asks the AI model (Groq) for a reply, saves it, and returns it.
+
+From 3b it also has a tool registry with one read-only tool, `list_tasks` (tier 1). Every tool use is written to the `tool_calls` activity log before it runs, using a backend-only key; if the log cannot be written, the tool does not run. The dashboard shows what was actually done under each reply and in a read-only Recent activity panel.
 
 Setup, all in the Supabase dashboard (nothing secret goes in the repo):
 
@@ -72,7 +74,7 @@ Each phase is small, tested on its own, and approved before the next begins.
 - **Phase 0, feasibility tests (needs Android Studio):** prove on the real phone that a voice service survives being minimized and that a reminder fires on time with the app closed.
 - **Phase 1, database foundation:** done.
 - **Phase 2, text dashboard:** done.
-- **Phase 3, orchestrator:** 3a chat only (this step), 3b read-only task tool plus audit log, 3c task-changing tools with confirmation.
+- **Phase 3, orchestrator:** 3a chat only (done), 3b read-only task tool plus activity log (this step), 3c task-changing tools with confirmation.
 - **Phase 4, Android app:** native shell, local reminder alarms, push.
 - **Phase 5, memory and proactive jobs:** memory screen, morning summary, nudges.
 - **Phase 6, voice and minimized operation.**

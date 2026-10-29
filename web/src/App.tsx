@@ -133,6 +133,7 @@ function Dashboard({ email }: { email: string }) {
   const [newTitle, setNewTitle] = useState('')
   const [newDue, setNewDue] = useState('')
   const [saving, setSaving] = useState(false)
+  const [activityVersion, setActivityVersion] = useState(0)
 
   // Always reads from the database, so what you see is what is stored.
   const load = useCallback(async () => {
@@ -313,7 +314,9 @@ function Dashboard({ email }: { email: string }) {
         </>
       )}
 
-      <Chat />
+      <Chat onActivity={() => setActivityVersion((v) => v + 1)} />
+
+      <Activity version={activityVersion} />
 
       <p className="muted small updated">
         {loadedAt
@@ -370,10 +373,29 @@ function Section({ title, tasks, emptyText, overdue, onToggle, onDelete }: Secti
   )
 }
 
+type ChatAction = {
+  label: string
+  status: string
+  summary: string
+}
+
 type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  actions?: ChatAction[]
+}
+
+// The chat function needs the browser's local date, time and offset so that
+// "today" means your today.
+function localClientTime() {
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return {
+    local_date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    local_time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+    utc_offset_minutes: now.getTimezoneOffset(),
+  }
 }
 
 // When the chat function says no, it explains why in a JSON message. Show that.
@@ -392,7 +414,7 @@ async function describeFunctionError(err: unknown): Promise<string> {
   return err instanceof Error ? err.message : 'Something went wrong.'
 }
 
-function Chat() {
+function Chat({ onActivity }: { onActivity: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -458,7 +480,7 @@ function Chat() {
     setDraft('')
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('chat', {
-        body: { message: text, conversation_id: conversationId },
+        body: { message: text, conversation_id: conversationId, client: localClientTime() },
       })
       if (invokeError) {
         // Put the message back so nothing is lost, and say what went wrong.
@@ -467,7 +489,7 @@ function Chat() {
         setError(await describeFunctionError(invokeError))
         return
       }
-      const result = data as { reply?: string; conversation_id?: string } | null
+      const result = data as { reply?: string; conversation_id?: string; actions?: ChatAction[] } | null
       if (!result?.reply) {
         setMessages((current) => current.filter((m) => m.id !== pendingId))
         setDraft(text)
@@ -478,7 +500,7 @@ function Chat() {
       if (result.conversation_id) setConversationId(result.conversation_id)
       setMessages((current) => [
         ...current,
-        { id: `reply-${Date.now()}`, role: 'assistant', content: replyText },
+        { id: `reply-${Date.now()}`, role: 'assistant', content: replyText, actions: result.actions },
       ])
     } catch (caught) {
       setMessages((current) => current.filter((m) => m.id !== pendingId))
@@ -486,13 +508,14 @@ function Chat() {
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
     } finally {
       setSending(false)
+      onActivity()
     }
   }
 
   return (
     <section className="section">
       <h2>Talk to Myla</h2>
-      <p className="muted small">Myla can chat for now. She cannot see or change your tasks yet.</p>
+      <p className="muted small">Myla can chat and read your task list. She cannot add or change tasks yet.</p>
       <div className="card chat">
         <div className="chat-list" ref={listRef}>
           {!ready ? (
@@ -503,6 +526,16 @@ function Chat() {
             messages.map((m) => (
               <div key={m.id} className={`bubble ${m.role}`}>
                 {m.content}
+                {m.actions && m.actions.length > 0 && (
+                  <div className="actions">
+                    {m.actions.map((a, i) => (
+                      <span key={i}>
+                        {a.status === 'succeeded' ? '✓' : '✕'} {a.label}
+                        {a.summary ? ` (${a.summary})` : ''}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -526,6 +559,81 @@ function Chat() {
           </button>
         </form>
       </div>
+    </section>
+  )
+}
+
+type ActivityRow = {
+  id: string
+  tool_name: string
+  tier: number
+  status: string
+  result_summary: string | null
+  error: string | null
+  created_at: string
+}
+
+// Read-only view of the activity log. Only the backend can write to it.
+function Activity({ version }: { version: number }) {
+  const [rows, setRows] = useState<ActivityRow[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const { data, error: loadError } = await supabase
+      .from('tool_calls')
+      .select('id, tool_name, tier, status, result_summary, error, created_at')
+      .order('created_at', { ascending: false })
+      .limit(10)
+    if (loadError) {
+      setError(`Could not load the activity log: ${loadError.message}`)
+    } else {
+      setError(null)
+      setRows((data ?? []) as ActivityRow[])
+    }
+    setLoaded(true)
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load, version])
+
+  return (
+    <section className="section">
+      <h2>Recent activity</h2>
+      <p className="muted small">
+        What Myla actually did, as recorded by the backend. She cannot edit this list.
+      </p>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {loaded && rows.length === 0 ? (
+        <p className="muted">Nothing yet.</p>
+      ) : (
+        <ul className="list">
+          {rows.map((r) => (
+            <li key={r.id} className="task">
+              <div className="task-body">
+                <span className="title">
+                  {r.tool_name} · tier {r.tier} · {r.status}
+                </span>
+                <span className="due">
+                  {new Date(r.created_at).toLocaleString([], {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: 'numeric',
+                    minute: '2-digit',
+                  })}
+                  {r.result_summary ? ` · ${r.result_summary}` : ''}
+                  {r.error ? ` · ${r.error}` : ''}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   )
 }
