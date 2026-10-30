@@ -1,4 +1,4 @@
-// Myla chat function (Phase 3b: chat plus one read-only tool)
+// Myla chat function (Phase 3c: chat plus task tools, with confirmation for deletes)
 //
 // What it does, in order:
 //  1. Checks that a real signed-in user is asking.
@@ -8,6 +8,8 @@
 //     cannot be written, the tool does not run. The log is written with a
 //     backend-only key, so the app can read it but never edit it.
 //  5. Saves the final reply and returns it with a list of what was actually done.
+//  6. Tier 4 actions (deleting a task) are NOT run. The user is asked to confirm
+//     in the app, and only an explicit yes from the user runs them.
 //
 // Secrets (set in Supabase under Edge Functions, Secrets, never in the repo):
 //   GROQ_API_KEY (required), GROQ_MODEL (optional).
@@ -93,6 +95,42 @@ function weekday(localDate: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Checking tool arguments
+// ---------------------------------------------------------------------------
+
+const isUuid = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f-]{36}$/i.test(v)
+
+function cleanTitle(v: unknown): string {
+  const t = typeof v === 'string' ? v.trim() : ''
+  if (!t) throw new Error('A title is required.')
+  if (t.length > 200) throw new Error('The title is too long (200 characters at most).')
+  return t
+}
+
+function cleanNotes(v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null
+  if (typeof v !== 'string') throw new Error('Notes must be text.')
+  if (v.length > 2000) throw new Error('The notes are too long (2000 characters at most).')
+  return v
+}
+
+// "YYYY-MM-DD HH:MM" in the user's own time, converted to a UTC timestamp.
+function localDueToIso(v: unknown, c: ClientTime): string {
+  const text = typeof v === 'string' ? v.trim() : ''
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}$/.test(text)) {
+    throw new Error('Give the due date and time as YYYY-MM-DD HH:MM. If the time is unclear, ask the user.')
+  }
+  const [datePart, timePart] = text.split(/[ T]/)
+  const [y, m, d] = datePart.split('-').map(Number)
+  const [hh, mm] = timePart.split(':').map(Number)
+  const probe = new Date(Date.UTC(y, m - 1, d))
+  if (y < 2000 || y > 2100 || m < 1 || m > 12 || probe.getUTCMonth() !== m - 1 || hh > 23 || mm > 59) {
+    throw new Error('That due date is not valid.')
+  }
+  return new Date(Date.UTC(y, m - 1, d, hh, mm) + c.offsetMinutes * 60000).toISOString()
+}
+
+// ---------------------------------------------------------------------------
 // Tool registry. Every capability is declared here with a tier.
 // Tier 1 read low risk, 2 read sensitive, 3 act reversible,
 // 4 act consequential, 5 never automatic.
@@ -103,9 +141,15 @@ type ToolContext = { db: SupabaseClient; client: ClientTime }
 type Tool = {
   name: string
   label: string
+  // shown after a confirmed action actually ran (defaults to label)
+  doneLabel?: string
   tier: 1 | 2 | 3 | 4 | 5
+  // true = never runs on the model's say-so; the user must confirm first
+  confirm: boolean
   description: string
   parameters: Record<string, unknown>
+  // For confirm tools: checks the request and says exactly what would happen
+  describe?: (args: Record<string, unknown>, ctx: ToolContext) => Promise<string>
   run: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>
 }
 
@@ -115,6 +159,7 @@ const listTasks: Tool = {
   name: 'list_tasks',
   label: 'Looked at your tasks',
   tier: 1,
+  confirm: false,
   description:
     "Read the user's tasks from the database. Call it before answering anything about what is on their list.",
   parameters: {
@@ -135,7 +180,7 @@ const listTasks: Tool = {
 
     const { data, error } = await ctx.db
       .from('tasks')
-      .select('title, notes, due_at, status, completed_at')
+      .select('id, title, notes, due_at, status, completed_at')
       .in('status', ['open', 'done'])
       .order('created_at', { ascending: false })
       .limit(500)
@@ -168,6 +213,7 @@ const listTasks: Tool = {
     }
 
     const shown = picked.slice(0, 50).map((t) => ({
+      id: t.id,
       title: t.title,
       notes: t.notes,
       due: t.due_at ? toLocalText(t.due_at, ctx.client) : null,
@@ -181,7 +227,137 @@ const listTasks: Tool = {
   },
 }
 
-const tools: Tool[] = [listTasks]
+const addTask: Tool = {
+  name: 'add_task',
+  label: 'Added a task',
+  tier: 3,
+  confirm: false,
+  description:
+    'Add a new task. Use only when the user asks you to add or remember a task. Always include the due time if they gave a date.',
+  parameters: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Short task title.' },
+      due_local: {
+        type: 'string',
+        description: "Optional due date and time in the user's own time, as YYYY-MM-DD HH:MM.",
+      },
+      notes: { type: 'string', description: 'Optional notes.' },
+    },
+    required: ['title'],
+  },
+  run: async (args, ctx) => {
+    const title = cleanTitle(args.title)
+    const notes = cleanNotes(args.notes)
+    const due_at = args.due_local === undefined ? null : localDueToIso(args.due_local, ctx.client)
+    const { data, error } = await ctx.db
+      .from('tasks')
+      .insert({ title, notes, due_at })
+      .select('id, title, due_at')
+      .single()
+    if (error || !data) throw new Error(error?.message ?? 'The task was not saved.')
+    return {
+      summary: `Added "${data.title}"`,
+      data: { added: true, id: data.id, title: data.title, due: data.due_at ? toLocalText(data.due_at, ctx.client) : null },
+    }
+  },
+}
+
+const updateTask: Tool = {
+  name: 'update_task',
+  label: 'Changed a task',
+  tier: 3,
+  confirm: false,
+  description:
+    "Change a task's title, notes or due time (use this to reschedule). Get the task id from list_tasks first.",
+  parameters: {
+    type: 'object',
+    properties: {
+      task_id: { type: 'string', description: 'The id from list_tasks.' },
+      title: { type: 'string' },
+      notes: { type: 'string' },
+      due_local: { type: 'string', description: "New due date and time, YYYY-MM-DD HH:MM, in the user's own time." },
+      clear_due: { type: 'boolean', description: 'true to remove the due date.' },
+    },
+    required: ['task_id'],
+  },
+  run: async (args, ctx) => {
+    if (!isUuid(args.task_id)) throw new Error('A valid task_id from list_tasks is required.')
+    const patch: Record<string, unknown> = {}
+    if (args.title !== undefined) patch.title = cleanTitle(args.title)
+    if (args.notes !== undefined) patch.notes = cleanNotes(args.notes)
+    if (args.clear_due === true) patch.due_at = null
+    else if (args.due_local !== undefined) patch.due_at = localDueToIso(args.due_local, ctx.client)
+    if (Object.keys(patch).length === 0) throw new Error('Nothing to change was given.')
+    const { data, error } = await ctx.db
+      .from('tasks')
+      .update(patch)
+      .eq('id', args.task_id)
+      .select('id, title, due_at')
+    if (error) throw new Error(error.message)
+    if (!data || data.length === 0) throw new Error('No task with that id was found, so nothing was changed.')
+    return {
+      summary: `Changed "${data[0].title}"`,
+      data: { changed: true, title: data[0].title, due: data[0].due_at ? toLocalText(data[0].due_at, ctx.client) : null },
+    }
+  },
+}
+
+const completeTask: Tool = {
+  name: 'complete_task',
+  label: 'Marked a task done',
+  tier: 3,
+  confirm: false,
+  description: 'Mark an open task as done. Get the task id from list_tasks first.',
+  parameters: {
+    type: 'object',
+    properties: { task_id: { type: 'string', description: 'The id from list_tasks.' } },
+    required: ['task_id'],
+  },
+  run: async (args, ctx) => {
+    if (!isUuid(args.task_id)) throw new Error('A valid task_id from list_tasks is required.')
+    const { data, error } = await ctx.db
+      .from('tasks')
+      .update({ status: 'done', completed_at: new Date().toISOString() })
+      .eq('id', args.task_id)
+      .eq('status', 'open')
+      .select('id, title')
+    if (error) throw new Error(error.message)
+    if (!data || data.length === 0) throw new Error('No open task with that id was found, so nothing was changed.')
+    return { summary: `Marked "${data[0].title}" done`, data: { completed: true, title: data[0].title } }
+  },
+}
+
+const deleteTask: Tool = {
+  name: 'delete_task',
+  label: 'Asked to delete a task',
+  doneLabel: 'Deleted a task',
+  tier: 4,
+  confirm: true,
+  description:
+    'Delete a task for good. This does NOT delete anything by itself: it asks the user to confirm in the app. Get the task id from list_tasks first.',
+  parameters: {
+    type: 'object',
+    properties: { task_id: { type: 'string', description: 'The id from list_tasks.' } },
+    required: ['task_id'],
+  },
+  describe: async (args, ctx) => {
+    if (!isUuid(args.task_id)) throw new Error('A valid task_id from list_tasks is required.')
+    const { data, error } = await ctx.db.from('tasks').select('title').eq('id', args.task_id).maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new Error('No task with that id was found.')
+    return `Delete the task "${data.title}" for good`
+  },
+  run: async (args, ctx) => {
+    if (!isUuid(args.task_id)) throw new Error('A valid task_id is required.')
+    const { data, error } = await ctx.db.from('tasks').delete().eq('id', args.task_id).select('id, title')
+    if (error) throw new Error(error.message)
+    if (!data || data.length === 0) throw new Error('The task was not found, so nothing was deleted.')
+    return { summary: `Deleted the task "${data[0].title}"`, data: { deleted: true, title: data[0].title } }
+  },
+}
+
+const tools: Tool[] = [listTasks, addTask, updateTask, completeTask, deleteTask]
 const toolByName = new Map(tools.map((t) => [t.name, t]))
 
 // ---------------------------------------------------------------------------
@@ -193,9 +369,11 @@ function systemPrompt(c: ClientTime): string {
 
 The user's local date and time right now: ${weekday(c.localDate)} ${c.localDate}, ${c.localTime}.
 
-What you can do: read the user's task list with the list_tasks tool. Always call it before saying anything about their tasks. Only mention tasks that appear in its result, and say how many there are. If a tool fails or is not run, say so plainly. Earlier messages in this conversation may say you could not read tasks; that was true then and is out of date now.
+What you can do, using tools: read the task list (list_tasks), add a task (add_task), change or reschedule a task (update_task), mark a task done (complete_task), and ask to delete a task (delete_task). Always call list_tasks before saying anything about their tasks, and use it to get task ids; never show ids to the user. Only mention tasks that appear in a tool result, and say how many there are. Due times need a date and a time; if the time is unclear, ask the user instead of guessing. Make only the change the user asked for. Earlier messages in this conversation may say you could not read or change tasks; that is out of date now.
 
-What you cannot do yet: add, change, complete or delete tasks, set reminders, or read email, messages or the calendar. If asked, say plainly that you cannot do it yet, and that they can use the Today screen for tasks.
+Deleting is different: delete_task does not delete anything. It asks the user to confirm in the app. After calling it, tell the user you have asked them to confirm and that nothing is deleted until they do. Never say a task was deleted, added, changed or completed unless a tool result in this conversation says so. If a tool fails or is not run, say so plainly.
+
+What you cannot do yet: set reminders, or read email, messages or the calendar. If asked, say plainly that you cannot do it yet.
 
 Never claim that you did, checked, saved, scheduled or sent something unless a tool result in this conversation confirms it. Never invent tasks, schedules, messages or personal details. If you do not know something, say so.
 
@@ -258,7 +436,32 @@ async function callGroq(
 // ---------------------------------------------------------------------------
 
 type ToolCall = { id?: string; function?: { name?: string; arguments?: string } }
-type Action = { label: string; status: 'succeeded' | 'failed'; summary: string }
+type Action = {
+  label: string
+  status: 'succeeded' | 'failed' | 'awaiting_confirmation' | 'cancelled'
+  summary: string
+}
+type Confirmation = { id: string; description: string }
+type Outcome = { action: Action; content: string; confirmation?: Confirmation }
+
+async function finishRow(
+  admin: SupabaseClient,
+  id: string,
+  status: 'succeeded' | 'failed' | 'cancelled',
+  summary: string,
+  error?: string,
+) {
+  const { error: updateError } = await admin
+    .from('tool_calls')
+    .update({
+      status,
+      result_summary: summary,
+      error: error ?? null,
+      finished_at: new Date().toISOString(),
+    })
+    .eq('id', id)
+  if (updateError) console.error('Could not update the log entry:', updateError.message)
+}
 
 async function runTool(
   call: ToolCall,
@@ -266,7 +469,7 @@ async function runTool(
   admin: SupabaseClient,
   userId: string,
   conversationId: string,
-): Promise<{ action: Action; content: string }> {
+): Promise<Outcome> {
   const name = call.function?.name ?? 'unknown'
   const tool = toolByName.get(name)
   const rawArgs = call.function?.arguments ?? '{}'
@@ -281,7 +484,7 @@ async function runTool(
       tool_name: name,
       tier: tool?.tier ?? 5,
       executor: 'server',
-      input_summary: rawArgs.slice(0, 300),
+      input_summary: rawArgs.slice(0, 2000),
       status: 'pending',
     })
     .select('id')
@@ -293,53 +496,57 @@ async function runTool(
     }
   }
 
-  const finish = async (status: 'succeeded' | 'failed', summary: string, error?: string) => {
-    const { error: updateError } = await admin
-      .from('tool_calls')
-      .update({
-        status,
-        result_summary: summary,
-        error: error ?? null,
-        finished_at: new Date().toISOString(),
-      })
-      .eq('id', row.id)
-    if (updateError) console.error('Could not finish the log entry:', updateError.message)
-  }
-
-  if (!tool) {
-    await finish('failed', 'unknown tool', `No tool named "${name}".`)
+  const fail = async (summary: string, detail: string): Promise<Outcome> => {
+    await finishRow(admin, row.id, 'failed', summary, detail)
     return {
-      action: { label, status: 'failed', summary: 'unknown tool' },
-      content: JSON.stringify({ error: `No tool named "${name}".` }),
+      action: { label, status: 'failed', summary },
+      content: JSON.stringify({ error: detail }),
     }
   }
+
+  if (!tool) return await fail('unknown tool', `No tool named "${name}".`)
 
   let args: Record<string, unknown> = {}
   try {
     args = JSON.parse(rawArgs || '{}')
   } catch {
-    await finish('failed', 'bad arguments', 'The tool arguments were not valid JSON.')
-    return {
-      action: { label, status: 'failed', summary: 'bad arguments' },
-      content: JSON.stringify({ error: 'The tool arguments were not valid.' }),
+    return await fail('bad arguments', 'The tool arguments were not valid.')
+  }
+
+  // 2. Tier 4 and up: do NOT run. Hold it and ask the user to confirm in the app.
+  if (tool.confirm) {
+    try {
+      const description = tool.describe ? await tool.describe(args, ctx) : `Run ${tool.name}`
+      const { error: holdError } = await admin
+        .from('tool_calls')
+        .update({ status: 'awaiting_confirmation', result_summary: description })
+        .eq('id', row.id)
+      if (holdError) throw new Error('The request could not be held for confirmation.')
+      return {
+        action: { label, status: 'awaiting_confirmation', summary: description },
+        confirmation: { id: row.id, description },
+        content: JSON.stringify({
+          status: 'awaiting_user_confirmation',
+          note: 'NOTHING has been done yet. The user has been asked to confirm in the app.',
+        }),
+      }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'unknown error'
+      return await fail(message, message)
     }
   }
 
-  // 2. Run it and record the real outcome.
+  // 3. Run it and record the real outcome.
   try {
     const result = await tool.run(args, ctx)
-    await finish('succeeded', result.summary)
+    await finishRow(admin, row.id, 'succeeded', result.summary)
     return {
       action: { label, status: 'succeeded', summary: result.summary },
       content: JSON.stringify(result.data),
     }
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : 'unknown error'
-    await finish('failed', 'failed', message)
-    return {
-      action: { label, status: 'failed', summary: message },
-      content: JSON.stringify({ error: message }),
-    }
+    return await fail(message, message)
   }
 }
 
@@ -373,16 +580,22 @@ Deno.serve(async (req) => {
   const userId = userData.user.id
 
   // 2. Read the request
-  let body: { message?: unknown; conversation_id?: unknown; client?: unknown }
+  let body: { message?: unknown; conversation_id?: unknown; client?: unknown; confirm?: unknown }
   try {
     body = await req.json()
   } catch {
     return json({ error: 'The request was not valid.' }, 400)
   }
+  const confirmRaw =
+    body.confirm && typeof body.confirm === 'object'
+      ? (body.confirm as { id?: unknown; decision?: unknown })
+      : null
   const message = typeof body.message === 'string' ? body.message.trim() : ''
-  if (!message) return json({ error: 'Type a message first.' }, 400)
-  if (message.length > 2000) {
-    return json({ error: 'That message is too long (the limit is 2000 characters).' }, 400)
+  if (!confirmRaw) {
+    if (!message) return json({ error: 'Type a message first.' }, 400)
+    if (message.length > 2000) {
+      return json({ error: 'That message is too long (the limit is 2000 characters).' }, 400)
+    }
   }
   const client = parseClient(body.client)
   if (!client) return json({ error: 'Your device time was not sent. Refresh the page and try again.' }, 400)
@@ -396,6 +609,64 @@ Deno.serve(async (req) => {
     auth: { persistSession: false },
   })
   const admin = createClient(supabaseUrl, adminKey, { auth: { persistSession: false } })
+
+  // Answering a confirmation: the user's own yes or no. The AI is not involved.
+  if (confirmRaw) {
+    const id = typeof confirmRaw.id === 'string' ? confirmRaw.id : ''
+    const decision =
+      confirmRaw.decision === 'approve' || confirmRaw.decision === 'cancel' ? confirmRaw.decision : ''
+    if (!id || !decision) return json({ error: 'The confirmation was not valid.' }, 400)
+
+    // Claim it in one step so it can only be answered once, and only within 10 minutes.
+    const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+    const { data: claimed, error: claimError } = await admin
+      .from('tool_calls')
+      .update({ status: 'pending' })
+      .eq('id', id)
+      .eq('user_id', userId)
+      .eq('status', 'awaiting_confirmation')
+      .gte('created_at', cutoff)
+      .select('id, tool_name, input_summary, conversation_id')
+      .maybeSingle()
+    if (claimError) return json({ error: `Could not check the confirmation: ${claimError.message}` }, 500)
+    if (!claimed) return json({ error: 'That confirmation has expired or was already answered.' }, 409)
+
+    const tool = toolByName.get(claimed.tool_name)
+    const label = tool?.label ?? claimed.tool_name
+    let action: Action
+    let text: string
+    if (decision === 'cancel') {
+      await finishRow(admin, claimed.id, 'cancelled', 'cancelled by the user')
+      action = { label, status: 'cancelled', summary: 'cancelled by you' }
+      text = 'Okay, cancelled. Nothing was changed.'
+    } else if (!tool) {
+      await finishRow(admin, claimed.id, 'failed', 'unknown tool', `No tool named "${claimed.tool_name}".`)
+      action = { label, status: 'failed', summary: 'unknown tool' }
+      text = 'That did not work: the action is no longer known.'
+    } else {
+      try {
+        const args = JSON.parse(claimed.input_summary ?? '{}') as Record<string, unknown>
+        const result = await tool.run(args, { db, client })
+        await finishRow(admin, claimed.id, 'succeeded', result.summary)
+        action = { label: tool.doneLabel ?? tool.label, status: 'succeeded', summary: result.summary }
+        text = `${result.summary}.`
+      } catch (caught) {
+        const m = caught instanceof Error ? caught.message : 'unknown error'
+        await finishRow(admin, claimed.id, 'failed', m, m)
+        action = { label, status: 'failed', summary: m }
+        text = `That did not work: ${m}`
+      }
+    }
+
+    const convoId = typeof claimed.conversation_id === 'string' ? claimed.conversation_id : null
+    if (convoId) {
+      const { error: saveError } = await db
+        .from('messages')
+        .insert({ conversation_id: convoId, role: 'assistant', content: text })
+      if (saveError) console.error('Could not save the confirmation result:', saveError.message)
+    }
+    return json({ conversation_id: convoId, reply: text, actions: [action] })
+  }
 
   // 3. Conversation and the user's message
   if (!conversationId) {
@@ -437,6 +708,7 @@ Deno.serve(async (req) => {
 
   const conversation: unknown[] = [{ role: 'system', content: systemPrompt(client) }, ...history]
   const actions: Action[] = []
+  const confirmations: Confirmation[] = []
   const ctx: ToolContext = { db, client }
   let reply = ''
 
@@ -450,6 +722,7 @@ Deno.serve(async (req) => {
         for (const call of calls) {
           const outcome = await runTool(call, ctx, admin, userId, conversationId)
           actions.push(outcome.action)
+          if (outcome.confirmation) confirmations.push(outcome.confirmation)
           conversation.push({ role: 'tool', tool_call_id: call.id, content: outcome.content })
         }
         continue
@@ -471,5 +744,5 @@ Deno.serve(async (req) => {
     return json({ error: `The AI answered, but the reply could not be saved: ${saveReplyError.message}` }, 500)
   }
 
-  return json({ conversation_id: conversationId, reply, actions })
+  return json({ conversation_id: conversationId, reply, actions, confirmations })
 })

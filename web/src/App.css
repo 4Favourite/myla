@@ -280,3 +280,21 @@ button:focus-visible {
   font-size: 0.8rem;
   opacity: 0.75;
 }
+
+.confirm {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.confirm-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.confirm-item span {
+  flex: 1 1 100%;
+  font-weight: 600;
+}

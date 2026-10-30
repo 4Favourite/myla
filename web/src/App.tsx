@@ -314,7 +314,12 @@ function Dashboard({ email }: { email: string }) {
         </>
       )}
 
-      <Chat onActivity={() => setActivityVersion((v) => v + 1)} />
+      <Chat
+        onActivity={() => {
+          setActivityVersion((v) => v + 1)
+          void load()
+        }}
+      />
 
       <Activity version={activityVersion} />
 
@@ -379,11 +384,24 @@ type ChatAction = {
   summary: string
 }
 
+type Confirmation = {
+  id: string
+  description: string
+}
+
 type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
   actions?: ChatAction[]
+  confirmations?: Confirmation[]
+}
+
+function actionMark(status: string): string {
+  if (status === 'succeeded') return '✓'
+  if (status === 'awaiting_confirmation') return '…'
+  if (status === 'cancelled') return '–'
+  return '✕'
 }
 
 // The chat function needs the browser's local date, time and offset so that
@@ -489,7 +507,12 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         setError(await describeFunctionError(invokeError))
         return
       }
-      const result = data as { reply?: string; conversation_id?: string; actions?: ChatAction[] } | null
+      const result = data as {
+        reply?: string
+        conversation_id?: string
+        actions?: ChatAction[]
+        confirmations?: Confirmation[]
+      } | null
       if (!result?.reply) {
         setMessages((current) => current.filter((m) => m.id !== pendingId))
         setDraft(text)
@@ -500,7 +523,13 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       if (result.conversation_id) setConversationId(result.conversation_id)
       setMessages((current) => [
         ...current,
-        { id: `reply-${Date.now()}`, role: 'assistant', content: replyText, actions: result.actions },
+        {
+          id: `reply-${Date.now()}`,
+          role: 'assistant',
+          content: replyText,
+          actions: result.actions,
+          confirmations: result.confirmations,
+        },
       ])
     } catch (caught) {
       setMessages((current) => current.filter((m) => m.id !== pendingId))
@@ -512,10 +541,49 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     }
   }
 
+  // The user's own yes or no. The AI is not involved in this step.
+  async function answerConfirmation(messageId: string, confirmationId: string, decision: 'approve' | 'cancel') {
+    if (sending) return
+    setSending(true)
+    setError(null)
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('chat', {
+        body: {
+          confirm: { id: confirmationId, decision },
+          conversation_id: conversationId,
+          client: localClientTime(),
+        },
+      })
+      if (invokeError) {
+        setError(await describeFunctionError(invokeError))
+        return
+      }
+      const result = data as { reply?: string; actions?: ChatAction[] } | null
+      if (!result?.reply) {
+        setError('No result came back. Check Recent activity to see what happened.')
+        return
+      }
+      const replyText = result.reply
+      setMessages((current) => [
+        ...current.map((m) =>
+          m.id === messageId
+            ? { ...m, confirmations: (m.confirmations ?? []).filter((c) => c.id !== confirmationId) }
+            : m,
+        ),
+        { id: `result-${Date.now()}`, role: 'assistant', content: replyText, actions: result.actions },
+      ])
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Something went wrong.')
+    } finally {
+      setSending(false)
+      onActivity()
+    }
+  }
+
   return (
     <section className="section">
       <h2>Talk to Myla</h2>
-      <p className="muted small">Myla can chat and read your task list. She cannot add or change tasks yet.</p>
+      <p className="muted small">Myla can read and change your tasks. She asks you before deleting anything.</p>
       <div className="card chat">
         <div className="chat-list" ref={listRef}>
           {!ready ? (
@@ -530,9 +598,32 @@ function Chat({ onActivity }: { onActivity: () => void }) {
                   <div className="actions">
                     {m.actions.map((a, i) => (
                       <span key={i}>
-                        {a.status === 'succeeded' ? '✓' : '✕'} {a.label}
+                        {actionMark(a.status)} {a.label}
                         {a.summary ? ` (${a.summary})` : ''}
                       </span>
+                    ))}
+                  </div>
+                )}
+                {m.confirmations && m.confirmations.length > 0 && (
+                  <div className="confirm">
+                    {m.confirmations.map((c) => (
+                      <div key={c.id} className="confirm-item">
+                        <span>{c.description}?</span>
+                        <button
+                          className="btn small"
+                          disabled={sending}
+                          onClick={() => void answerConfirmation(m.id, c.id, 'approve')}
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          className="btn ghost small"
+                          disabled={sending}
+                          onClick={() => void answerConfirmation(m.id, c.id, 'cancel')}
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     ))}
                   </div>
                 )}
