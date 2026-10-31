@@ -2,10 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { configError, supabase } from './lib/supabase'
+import {
+  isNative,
+  listenForDelivery,
+  openExactAlarmSettings,
+  requestNotifications,
+  scheduleTest,
+  syncPhone,
+} from './native'
+import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '5c'
+const WEB_VERSION = '5d'
 
 type Task = {
   id: string
@@ -315,6 +324,13 @@ function Dashboard({ email }: { email: string }) {
           <Section title="No date" tasks={groups.undated} onToggle={toggleTask} onDelete={deleteTask} />
           <Section title="Done recently" tasks={groups.done} onToggle={toggleTask} onDelete={deleteTask} />
         </>
+      )}
+
+      {isNative && (
+        <PhoneSetup
+          version={activityVersion}
+          onChange={() => setActivityVersion((v) => v + 1)}
+        />
       )}
 
       <Reminders version={activityVersion} />
@@ -927,7 +943,7 @@ function Reminders({ version }: { version: number }) {
                 <span className="title">{item.title}</span>
                 <span className={passed ? 'due overdue' : 'due'}>
                   {formatDue(item.remind_at)}
-                  {passed ? ' · time passed, not delivered' : ''}
+                  {passed ? ' · time passed, delivery not confirmed' : ''}
                 </span>
               </div>
               <button className="btn ghost small" onClick={() => void cancel(item)}>
@@ -1263,6 +1279,135 @@ function Settings() {
           {saving ? 'Saving…' : 'Save settings'}
         </button>
       </form>
+    </section>
+  )
+}
+
+// Only shown inside the Android app. Sets up alerts on this phone and reports
+// what is really scheduled, read back from the phone itself.
+function PhoneSetup({ version, onChange }: { version: number; onChange: () => void }) {
+  const [status, setStatus] = useState<PhoneStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const run = useCallback(async () => {
+    try {
+      setStatus(await syncPhone())
+      setError(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not sync this phone.')
+    }
+  }, [])
+
+  // Sync on open, whenever reminders change, and when you come back to the app.
+  useEffect(() => {
+    void run()
+  }, [run, version])
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void run()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [run])
+
+  // Keep the latest onChange without re-subscribing to phone events every render.
+  const onChangeRef = useRef(onChange)
+  useEffect(() => {
+    onChangeRef.current = onChange
+  })
+
+  useEffect(() => {
+    let stop: (() => void) | null = null
+    let cancelled = false
+    void listenForDelivery(() => onChangeRef.current()).then((fn) => {
+      if (cancelled) fn()
+      else stop = fn
+    })
+    return () => {
+      cancelled = true
+      if (stop) stop()
+    }
+  }, [])
+
+  async function act(action: () => Promise<void>, done: string) {
+    setBusy(true)
+    setNotice(null)
+    try {
+      await action()
+      setNotice(done)
+      await run()
+      onChange()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'That did not work.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const label = (value: string) =>
+    value === 'granted' ? 'Allowed' : value === 'denied' ? 'Not allowed' : value === 'not asked' ? 'Not asked yet' : 'Unknown'
+
+  return (
+    <section className="section">
+      <h2>This phone</h2>
+      <div className="card phone">
+        {status ? (
+          <div className="phone-status">
+            <span>Notifications: {label(status.notifications)}</span>
+            <span>
+              Exact timing: {label(status.exactAlarms)}
+              {status.exactAlarms === 'denied' ? ' (alerts may be late)' : ''}
+            </span>
+            <span>Alerts scheduled on this phone: {status.scheduledHere}</span>
+            <span>
+              Last synced: {status.syncedAt ? status.syncedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'not yet'}
+            </span>
+          </div>
+        ) : (
+          <p className="muted">Checking this phone…</p>
+        )}
+        {status?.problem && (
+          <p className="error" role="alert">
+            {status.problem}
+          </p>
+        )}
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {notice && <p className="muted small">{notice}</p>}
+        <div className="quick">
+          {status && status.notifications !== 'granted' && (
+            <button className="btn small" disabled={busy} onClick={() => void act(requestNotifications, 'Done. Checking again.')}>
+              Allow notifications
+            </button>
+          )}
+          {status?.exactAlarms === 'denied' && (
+            <button className="btn small" disabled={busy} onClick={() => void act(openExactAlarmSettings, 'Allow exact alarms there, then come back.')}>
+              Allow exact alarms
+            </button>
+          )}
+          <button className="btn ghost small" disabled={busy} onClick={() => void act(async () => {}, 'Synced.')}>
+            Sync now
+          </button>
+          <button
+            className="btn ghost small"
+            disabled={busy || status?.notifications !== 'granted'}
+            onClick={() => void act(scheduleTest, 'Test alert set for one minute from now. Minimise Myla and wait.')}
+          >
+            Test alert in 1 minute
+          </button>
+        </div>
+        <p className="muted small">
+          On Xiaomi and Redmi phones, allow autostart for Myla and set its battery option to No
+          restrictions, or alerts may arrive late. If you restart the phone, open Myla once so it can
+          schedule your reminders again.
+        </p>
+      </div>
     </section>
   )
 }

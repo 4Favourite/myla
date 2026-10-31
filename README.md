@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen, past chats list, timezone dropdown) is done; scheduled summaries and nudges wait for the Android app.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen, past chats list, timezone dropdown) is done; Phase 4b (the Android app, using Capacitor) is in progress; scheduled summaries and nudges wait for it.
 
 ## Principles
 
@@ -67,6 +67,30 @@ Setup, all in the Supabase dashboard (nothing secret goes in the repo):
 2. Create an Edge Function named exactly `chat` and paste in the code from `supabase/functions/chat/index.ts`.
 3. Turn off the function's JWT verification setting. The code verifies the signed-in user itself.
 
+## Phase 4b: the Android app
+
+The same dashboard runs inside an Android app made with Capacitor. Inside the app, a "This phone" panel asks for notification permission, registers the phone in the `devices` table, and schedules a local alarm for every saved reminder using the plugin `@capacitor/local-notifications`. It reads back what is really scheduled and shows it. A reminder is marked delivered only with evidence (its notification is in the tray, or the app saw it arrive or be tapped).
+
+From the `web` folder (Android Studio is needed for the last two steps):
+
+```
+npm install @capacitor/core @capacitor/android @capacitor/local-notifications --legacy-peer-deps
+npm install -D @capacitor/cli --legacy-peer-deps
+npm run build
+npx cap add android
+npx cap sync android
+npx cap open android
+```
+
+Then add these permission lines inside `<manifest>` in `web/android/app/src/main/AndroidManifest.xml` (next to the INTERNET line):
+
+```
+<uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+```
+
+After changing the website code, run `npm run build` and `npx cap sync android` again before running the app.
+
 ## Roadmap
 
 Each phase is small, tested on its own, and approved before the next begins.
@@ -75,7 +99,7 @@ Each phase is small, tested on its own, and approved before the next begins.
 - **Phase 1, database foundation:** done.
 - **Phase 2, text dashboard:** done.
 - **Phase 3, orchestrator:** 3a chat only (done), 3b read-only task tool plus activity log (done), 3c task-changing tools with confirmation (done).
-- **Phase 4, reminders and the Android app:** 4a reminders saved in the database with honest delivery status (done); 4b Android shell (Capacitor) with local reminder alarms and device registration.
+- **Phase 4, reminders and the Android app:** 4a reminders saved in the database with honest delivery status (done); 4b Android shell (Capacitor) with local reminder alarms and device registration (this step).
 - **Phase 5, memory and proactive jobs:** 5a memory tools and Memory screen (done); 5b summary on request, new-chat button and a Settings screen (this step), then scheduled summaries and nudges once a device can deliver them.
 - **Phase 6, voice and minimized operation.**
 - **After that, in this order:** email, messages, other-app and browser control, calendar and contacts, desktop.

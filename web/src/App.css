@@ -373,3 +373,14 @@ select {
 .chat-item.current {
   border-color: var(--accent);
 }
+
+.phone {
+  display: grid;
+  gap: 12px;
+}
+
+.phone-status {
+  display: grid;
+  gap: 4px;
+  font-size: 0.9rem;
+}

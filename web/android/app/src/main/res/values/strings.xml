@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Myla</string>
+    <string name="title_activity_main">Myla</string>
+    <string name="package_name">app.myla.assistant</string>
+    <string name="custom_url_scheme">app.myla.assistant</string>
+</resources>
