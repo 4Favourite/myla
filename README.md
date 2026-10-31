@@ -69,7 +69,7 @@ Setup, all in the Supabase dashboard (nothing secret goes in the repo):
 
 ## Voice (6a)
 
-The chat has a Talk button (tap, speak, it stops when you stop and sends what it heard), an option to read replies aloud with a voice you choose, and a Stop talking button. Talking over Myla stops her. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
+The chat has a voice panel: tap the mic, speak, and tap Done (or stay quiet for your chosen time: 2, 3 or 5 seconds, or only when you tap Done). The browser stops listening at short pauses, so the app keeps listening and joins what you said. It shows a live transcript and animations for listening, thinking and speaking. There is an option to read replies aloud with a voice you choose. Tapping the orb while Myla speaks stops her, and talking over her stops her too. Times are shown in 12-hour format, and Settings uses a 12-hour time picker. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
 
 ## Phase 4b: the Android app
 

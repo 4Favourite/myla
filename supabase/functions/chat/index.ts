@@ -25,7 +25,7 @@ const corsHeaders = {
 const MAX_TOOL_ROUNDS = 3
 
 // Shown in the dashboard so you can see which version of this function is running.
-const FUNCTION_VERSION = '6a'
+const FUNCTION_VERSION = '6b'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -88,7 +88,17 @@ function startOfLocalDay(c: ClientTime): number {
 
 function toLocalText(iso: string, c: ClientTime): string {
   const local = new Date(new Date(iso).getTime() - c.offsetMinutes * 60000)
-  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const h = local.getUTCHours()
+  const hour12 = h % 12 === 0 ? 12 : h % 12
+  return `${days[local.getUTCDay()]} ${local.getUTCDate()} ${months[local.getUTCMonth()]} ${local.getUTCFullYear()}, ${hour12}:${pad(local.getUTCMinutes())} ${h < 12 ? 'AM' : 'PM'}`
+}
+
+// "17:05" becomes "5:05 PM"
+function to12h(time: string): string {
+  const [h, m] = time.split(':').map(Number)
+  return `${h % 12 === 0 ? 12 : h % 12}:${pad(m)} ${h < 12 ? 'AM' : 'PM'}`
 }
 
 function weekday(localDate: string): string {
@@ -613,9 +623,9 @@ function systemPrompt(c: ClientTime, memory: { content: string; kind: string }[]
       : memory.length === 0
         ? '\n\nYou have nothing saved about the user yet.'
         : `\n\nWhat the user has told you before (background only; use it when it helps, never recite it unprompted):\n${memory.map((m) => `- (${m.kind}) ${m.content}`).join('\n')}`
-  return `You are Myla, a personal assistant for one person. Speak naturally, warmly and briefly.
+  return `You are Myla, a personal assistant for one person. Speak naturally, warmly and briefly. Always write times in 12-hour format with AM or PM (for example 5:30 PM), never 24-hour, and write dates in a friendly way such as Wed 28 Oct.
 
-The user's local date and time right now: ${weekday(c.localDate)} ${c.localDate}, ${c.localTime}.
+The user's local date and time right now: ${weekday(c.localDate)} ${c.localDate}, ${to12h(c.localTime)}.
 
 What you can do, using tools: read the task list (list_tasks), add a task (add_task), change or reschedule a task (update_task), mark a task done (complete_task), and ask to delete a task (delete_task). You can also save reminders (set_reminder), read them (list_reminders) and cancel them (cancel_reminder); call list_reminders before saying anything about existing reminders, and use it to get reminder ids. Always call list_tasks before saying anything about their tasks, and use it to get task ids; never show ids to the user. Only mention tasks that appear in a tool result, and say how many there are. Due times need a date and a time; if the time is unclear, ask the user instead of guessing. Make only the change the user asked for. Earlier messages in this conversation may say you could not read or change tasks; that is out of date now.
 

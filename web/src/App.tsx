@@ -14,7 +14,7 @@ import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '6a'
+const WEB_VERSION = '6b'
 
 type Task = {
   id: string
@@ -40,6 +40,7 @@ function formatDue(iso: string): string {
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+    hour12: true,
   })
 }
 
@@ -350,7 +351,7 @@ function Dashboard({ email }: { email: string }) {
 
       <p className="muted small updated">
         {loadedAt
-          ? `Last loaded ${loadedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. `
+          ? `Last loaded ${loadedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}. `
           : ''}
         <button className="link" onClick={() => void load()}>
           Refresh
@@ -416,6 +417,17 @@ type Confirmation = {
 
 // Voice: the browser's own speech recognition and speech voices. Free, but quality
 // varies, and the browser usually sends your audio to its maker's speech service.
+type VoiceSession = {
+  text: string
+  interim: string
+  startedAt: number
+  done: boolean
+  cancelled: boolean
+  failed: boolean
+  timer: number | null
+  recognition: RecognitionLike | null
+}
+
 type SpeechResultLike = { isFinal: boolean; 0: { transcript: string } }
 type SpeechEventLike = { resultIndex: number; results: ArrayLike<SpeechResultLike> }
 type RecognitionLike = {
@@ -534,11 +546,17 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [showChats, setShowChats] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
-  const recognitionRef = useRef<RecognitionLike | null>(null)
+  const voiceRef = useRef<VoiceSession | null>(null)
   const voiceSupported = getRecognitionCtor() !== null
   const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
   const [listening, setListening] = useState(false)
   const [heard, setHeard] = useState('')
+  const [speaking, setSpeaking] = useState(false)
+  const [pauseMs, setPauseMs] = useState(() => {
+    const stored = readSetting('myla.pause')
+    const value = stored === null ? 3000 : Number(stored)
+    return [0, 2000, 3000, 5000].includes(value) ? value : 3000
+  })
   const [speakReplies, setSpeakReplies] = useState(() => readSetting('myla.speak') === '1')
   const [voiceName, setVoiceName] = useState(() => readSetting('myla.voice') ?? '')
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
@@ -643,6 +661,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
 
   function stopSpeaking() {
     if (speechSupported) window.speechSynthesis.cancel()
+    setSpeaking(false)
   }
 
   function speak(text: string) {
@@ -654,52 +673,135 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       utterance.voice = chosen
       utterance.lang = chosen.lang
     }
+    utterance.onstart = () => setSpeaking(true)
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => setSpeaking(false)
     window.speechSynthesis.speak(utterance)
   }
 
-  // Tap to talk. It stops by itself when you stop speaking, then sends what it heard.
-  function toggleListening() {
-    if (listening) {
-      recognitionRef.current?.stop()
-      return
-    }
+  // Voice input. The browser stops listening at short pauses, so this keeps
+  // listening until you have been quiet for your chosen time (or tap Done).
+  function armSilenceTimer(session: VoiceSession, ms: number) {
+    if (session.timer !== null) window.clearTimeout(session.timer)
+    session.timer = ms > 0 ? window.setTimeout(() => stopListening(), ms) : null
+  }
+
+  function finishListening() {
+    const session = voiceRef.current
+    if (!session) return
+    if (session.timer !== null) window.clearTimeout(session.timer)
+    voiceRef.current = null
+    setListening(false)
+    setHeard('')
+    const said = session.text.trim()
+    if (session.cancelled || session.failed) return
+    if (said) void sendText(said, 'voice')
+    else setError('I did not hear anything. Tap the mic and try again.')
+  }
+
+  // Done (or a long enough pause) stops listening and sends what was heard.
+  function stopListening() {
+    const session = voiceRef.current
+    if (!session) return
+    session.done = true
+    if (session.recognition) session.recognition.stop()
+    else finishListening()
+  }
+
+  function cancelListening() {
+    const session = voiceRef.current
+    if (!session) return
+    session.cancelled = true
+    stopListening()
+  }
+
+  function runRecognition(session: VoiceSession) {
     const Ctor = getRecognitionCtor()
-    if (!Ctor || sending) return
-    stopSpeaking() // talking over Myla interrupts her
+    if (!Ctor) return
     const recognition = new Ctor()
     recognition.lang = navigator.language || 'en-US'
     recognition.interimResults = true
     recognition.continuous = false
-    let finalText = ''
     recognition.onresult = (event) => {
       let interimText = ''
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i]
-        if (result.isFinal) finalText += result[0].transcript
+        if (result.isFinal) session.text = `${session.text} ${result[0].transcript}`.trim()
         else interimText += result[0].transcript
       }
-      setHeard((finalText + interimText).trim())
+      session.interim = interimText.trim()
+      setHeard(`${session.text} ${session.interim}`.trim())
+      armSilenceTimer(session, pauseMs)
     }
     recognition.onerror = (event) => {
-      if (event.error !== 'aborted') setError(voiceErrorText(event.error))
+      if (event.error === 'no-speech' || event.error === 'aborted') return
+      session.failed = true
+      session.done = true
+      setError(voiceErrorText(event.error))
     }
     recognition.onend = () => {
-      setListening(false)
-      setHeard('')
-      recognitionRef.current = null
-      const said = finalText.trim()
-      if (said) void sendText(said, 'voice')
+      session.recognition = null
+      if (session.interim) {
+        session.text = `${session.text} ${session.interim}`.trim()
+        session.interim = ''
+      }
+      const tooLong = Date.now() - session.startedAt > 120000
+      if (!session.done && !tooLong) {
+        runRecognition(session) // the browser stopped at a short pause: keep listening
+        return
+      }
+      finishListening()
     }
-    recognitionRef.current = recognition
-    setError(null)
-    setListening(true)
+    session.recognition = recognition
     try {
       recognition.start()
     } catch {
-      setListening(false)
+      session.failed = true
+      session.done = true
       setError('Could not start the microphone.')
+      finishListening()
     }
   }
+
+  function toggleListening() {
+    if (voiceRef.current) {
+      stopListening()
+      return
+    }
+    if (!getRecognitionCtor() || sending) return
+    stopSpeaking() // talking over Myla interrupts her
+    const session: VoiceSession = {
+      text: '',
+      interim: '',
+      startedAt: Date.now(),
+      done: false,
+      cancelled: false,
+      failed: false,
+      timer: null,
+      recognition: null,
+    }
+    voiceRef.current = session
+    setError(null)
+    setHeard('')
+    setListening(true)
+    // Allow a little longer before the first words.
+    armSilenceTimer(session, pauseMs > 0 ? Math.max(pauseMs, 6000) : 0)
+    runRecognition(session)
+  }
+
+  // Stop the microphone and the voice if you leave the page.
+  useEffect(() => {
+    return () => {
+      const session = voiceRef.current
+      if (session) {
+        session.cancelled = true
+        session.done = true
+        if (session.timer !== null) window.clearTimeout(session.timer)
+        session.recognition?.stop()
+      }
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel()
+    }
+  }, [])
 
   // Start a fresh conversation. The next message creates a new one.
   function startNew() {
@@ -903,6 +1005,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
                         day: 'numeric',
                         hour: 'numeric',
                         minute: '2-digit',
+                        hour12: true,
                       })}
                     </span>
                   </button>
@@ -911,7 +1014,64 @@ function Chat({ onActivity }: { onActivity: () => void }) {
             )}
           </ul>
         )}
-        {listening && <p className="muted small">Listening… {heard}</p>}
+        <div
+          className={`voice${listening ? ' is-listening' : ''}${speaking ? ' is-speaking' : ''}${sending && !listening ? ' is-thinking' : ''}`}
+        >
+          <button
+            type="button"
+            className="orb"
+            disabled={!voiceSupported || (sending && !listening)}
+            onClick={speaking ? stopSpeaking : toggleListening}
+            aria-label={listening ? 'Finish and send' : speaking ? 'Stop talking' : 'Start talking'}
+          >
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" />
+              <path d="M12 18v3" />
+            </svg>
+          </button>
+          <div className="voice-text">
+            <span className="voice-status">
+              {listening
+                ? 'Listening…'
+                : sending
+                  ? 'Thinking…'
+                  : speaking
+                    ? 'Speaking…'
+                    : voiceSupported
+                      ? 'Tap the mic to talk'
+                      : 'Voice is not available here yet'}
+            </span>
+            <span className="voice-heard">
+              {listening
+                ? heard || 'Say something…'
+                : voiceSupported
+                  ? pauseMs > 0
+                    ? `It sends after ${pauseMs / 1000} seconds of quiet, or tap Done.`
+                    : 'Tap Done when you finish speaking.'
+                  : ''}
+            </span>
+          </div>
+          {(listening || speaking) && (
+            <div className="bars" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+          {listening && (
+            <div className="voice-actions">
+              <button type="button" className="btn small" onClick={stopListening}>
+                Done
+              </button>
+              <button type="button" className="btn ghost small" onClick={cancelListening}>
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
         <form className="chat-form" onSubmit={send}>
           <input
             aria-label="Message Myla"
@@ -920,19 +1080,27 @@ function Chat({ onActivity }: { onActivity: () => void }) {
             onChange={(e) => setDraft(e.target.value)}
             disabled={sending}
           />
-          <button
-            type="button"
-            className={listening ? 'btn small recording' : 'btn ghost small'}
-            disabled={sending || !voiceSupported}
-            onClick={toggleListening}
-          >
-            {listening ? 'Stop' : 'Talk'}
-          </button>
           <button className="btn" type="submit" disabled={sending || !draft.trim()}>
             Send
           </button>
         </form>
         <div className="voice-options">
+          <label className="inline">
+            Wait after I pause
+            <select
+              value={pauseMs}
+              onChange={(e) => {
+                const value = Number(e.target.value)
+                setPauseMs(value)
+                writeSetting('myla.pause', String(value))
+              }}
+            >
+              <option value={2000}>2 seconds</option>
+              <option value={3000}>3 seconds</option>
+              <option value={5000}>5 seconds</option>
+              <option value={0}>Only when I tap Done</option>
+            </select>
+          </label>
           {speechSupported && (
             <>
               <label className="switch">
@@ -962,11 +1130,6 @@ function Chat({ onActivity }: { onActivity: () => void }) {
                     </option>
                   ))}
                 </select>
-              )}
-              {speakReplies && (
-                <button type="button" className="btn ghost small" onClick={stopSpeaking}>
-                  Stop talking
-                </button>
               )}
             </>
           )}
@@ -1046,6 +1209,7 @@ function Activity({ version }: { version: number }) {
                     day: 'numeric',
                     hour: 'numeric',
                     minute: '2-digit',
+                    hour12: true,
                   })}
                   {r.result_summary ? ` · ${r.result_summary}` : ''}
                   {r.error ? ` · ${r.error}` : ''}
@@ -1313,6 +1477,53 @@ const SWITCH_LABELS: Record<string, string> = {
   suggestions: 'Suggestions',
 }
 
+// A 12-hour time picker. The value is kept as 24-hour HH:MM, or empty for "not set".
+function TimeSelect({ value, onChange, label }: { value: string; onChange: (v: string) => void; label: string }) {
+  if (!value) {
+    return (
+      <div className="time-select">
+        <span className="muted">Not set</span>
+        <button type="button" className="btn ghost small" onClick={() => onChange('08:00')}>
+          Set a time
+        </button>
+      </div>
+    )
+  }
+  const [h24, minute] = value.split(':').map(Number)
+  const period = h24 >= 12 ? 'PM' : 'AM'
+  const hour12 = h24 % 12 === 0 ? 12 : h24 % 12
+  const emit = (nextHour: number, nextMinute: number, nextPeriod: string) => {
+    const base = nextHour % 12
+    const hours = nextPeriod === 'PM' ? base + 12 : base
+    onChange(`${String(hours).padStart(2, '0')}:${String(nextMinute).padStart(2, '0')}`)
+  }
+  return (
+    <div className="time-select">
+      <select aria-label={`${label} hour`} value={hour12} onChange={(e) => emit(Number(e.target.value), minute, period)}>
+        {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
+          <option key={n} value={n}>
+            {n}
+          </option>
+        ))}
+      </select>
+      <select aria-label={`${label} minute`} value={minute} onChange={(e) => emit(hour12, Number(e.target.value), period)}>
+        {Array.from({ length: 60 }, (_, i) => i).map((n) => (
+          <option key={n} value={n}>
+            {String(n).padStart(2, '0')}
+          </option>
+        ))}
+      </select>
+      <select aria-label={`${label} AM or PM`} value={period} onChange={(e) => emit(hour12, minute, e.target.value)}>
+        <option value="AM">AM</option>
+        <option value="PM">PM</option>
+      </select>
+      <button type="button" className="btn ghost small" onClick={() => onChange('')}>
+        Clear
+      </button>
+    </div>
+  )
+}
+
 // Every timezone this browser knows, plus UTC and whatever is currently saved.
 function timezoneOptions(current: string): string[] {
   let zones: string[] = []
@@ -1427,18 +1638,18 @@ function Settings() {
             ))}
           </select>
         </label>
-        <label>
-          Morning summary time
-          <input type="time" value={morning} onChange={(e) => setMorning(e.target.value)} />
-        </label>
-        <label>
-          Quiet hours start
-          <input type="time" value={quietStart} onChange={(e) => setQuietStart(e.target.value)} />
-        </label>
-        <label>
-          Quiet hours end
-          <input type="time" value={quietEnd} onChange={(e) => setQuietEnd(e.target.value)} />
-        </label>
+        <div className="field">
+          <span>Morning summary time</span>
+          <TimeSelect label="Morning summary time" value={morning} onChange={setMorning} />
+        </div>
+        <div className="field">
+          <span>Quiet hours start</span>
+          <TimeSelect label="Quiet hours start" value={quietStart} onChange={setQuietStart} />
+        </div>
+        <div className="field">
+          <span>Quiet hours end</span>
+          <TimeSelect label="Quiet hours end" value={quietEnd} onChange={setQuietEnd} />
+        </div>
         <label>
           Most nudges per day
           <input
@@ -1555,7 +1766,7 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
             </span>
             <span>Alerts scheduled on this phone: {status.scheduledHere}</span>
             <span>
-              Last synced: {status.syncedAt ? status.syncedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'not yet'}
+              Last synced: {status.syncedAt ? status.syncedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }) : 'not yet'}
             </span>
           </div>
         ) : (
