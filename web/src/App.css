@@ -298,3 +298,47 @@ button:focus-visible {
   flex: 1 1 100%;
   font-weight: 600;
 }
+
+input[type='time'],
+input[type='number'] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings {
+  display: grid;
+  gap: 12px;
+}
+
+.settings label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+
+.switches {
+  display: grid;
+  gap: 8px;
+}
+
+.settings .switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.switch input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}

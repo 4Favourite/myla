@@ -327,6 +327,8 @@ function Dashboard({ email }: { email: string }) {
 
       <Memory version={activityVersion} />
 
+      <Settings />
+
       <p className="muted small updated">
         {loadedAt
           ? `Last loaded ${loadedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. `
@@ -491,9 +493,21 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, sending])
 
-  async function send(event: FormEvent<HTMLFormElement>) {
+  function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const text = draft.trim()
+    void sendText(draft.trim())
+  }
+
+  // Start a fresh conversation. The next message creates a new one.
+  function startNew() {
+    if (sending) return
+    setMessages([])
+    setConversationId(null)
+    setError(null)
+    setDraft('')
+  }
+
+  async function sendText(text: string) {
     if (!text || sending) return
     setSending(true)
     setError(null)
@@ -641,6 +655,19 @@ function Chat({ onActivity }: { onActivity: () => void }) {
             {error}
           </p>
         )}
+        <div className="quick">
+          <button
+            type="button"
+            className="btn ghost small"
+            disabled={sending}
+            onClick={() => void sendText('Give me my morning summary.')}
+          >
+            Summarize my day
+          </button>
+          <button type="button" className="btn ghost small" disabled={sending} onClick={startNew}>
+            New chat
+          </button>
+        </div>
         <form className="chat-form" onSubmit={send}>
           <input
             aria-label="Message Myla"
@@ -967,6 +994,156 @@ function Memory({ version }: { version: number }) {
         />
         <button className="btn" type="submit" disabled={saving || !draft.trim()}>
           {saving ? 'Saving…' : 'Add to memory'}
+        </button>
+      </form>
+    </section>
+  )
+}
+
+const DEFAULT_SWITCHES: Record<string, boolean> = {
+  reminders: true,
+  morning_summary: true,
+  overdue_nudges: true,
+  suggestions: true,
+}
+
+const SWITCH_LABELS: Record<string, string> = {
+  reminders: 'Reminders',
+  morning_summary: 'Morning summary',
+  overdue_nudges: 'Overdue nudges',
+  suggestions: 'Suggestions',
+}
+
+// Quiet hours, summary time, nudge limit and per-feature switches.
+// They are stored now. Nothing uses them yet: they apply once your phone delivers alerts.
+function Settings() {
+  const [timezone, setTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
+  const [morning, setMorning] = useState('')
+  const [quietStart, setQuietStart] = useState('')
+  const [quietEnd, setQuietEnd] = useState('')
+  const [cap, setCap] = useState(5)
+  const [switches, setSwitches] = useState<Record<string, boolean>>(DEFAULT_SWITCHES)
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const { data, error: loadError } = await supabase
+      .from('settings')
+      .select('timezone, morning_summary_time, quiet_hours_start, quiet_hours_end, nudge_daily_cap, switches')
+      .maybeSingle()
+    if (loadError) {
+      setError(`Could not load settings: ${loadError.message}`)
+      return
+    }
+    if (data) {
+      setTimezone(data.timezone ?? 'UTC')
+      setMorning((data.morning_summary_time ?? '').slice(0, 5))
+      setQuietStart((data.quiet_hours_start ?? '').slice(0, 5))
+      setQuietEnd((data.quiet_hours_end ?? '').slice(0, 5))
+      setCap(typeof data.nudge_daily_cap === 'number' ? data.nudge_daily_cap : 5)
+      setSwitches({ ...DEFAULT_SWITCHES, ...(data.switches ?? {}) })
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSaving(true)
+    setNotice(null)
+    setError(null)
+    try {
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: timezone.trim() })
+      } catch {
+        setError('That timezone name is not recognised. Use a name like Africa/Lagos.')
+        return
+      }
+      const { data: userData, error: userError } = await supabase.auth.getUser()
+      if (userError || !userData.user) {
+        setError('You are not signed in.')
+        return
+      }
+      const { error: saveError } = await supabase.from('settings').upsert(
+        {
+          user_id: userData.user.id,
+          timezone: timezone.trim() || 'UTC',
+          morning_summary_time: morning || null,
+          quiet_hours_start: quietStart || null,
+          quiet_hours_end: quietEnd || null,
+          nudge_daily_cap: Math.max(0, Math.floor(cap)),
+          switches,
+        },
+        { onConflict: 'user_id' },
+      )
+      if (saveError) {
+        setError(`Could not save settings: ${saveError.message}`)
+      } else {
+        await load() // show what the database now holds
+        setNotice('Saved.')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="section">
+      <h2>Settings</h2>
+      <p className="muted small">
+        Saved for later. Nothing uses these yet: they apply once your phone delivers reminders and
+        summaries.
+      </p>
+      <form className="card settings" onSubmit={save}>
+        <label>
+          Timezone
+          <input value={timezone} onChange={(e) => setTimezone(e.target.value)} />
+        </label>
+        <label>
+          Morning summary time
+          <input type="time" value={morning} onChange={(e) => setMorning(e.target.value)} />
+        </label>
+        <label>
+          Quiet hours start
+          <input type="time" value={quietStart} onChange={(e) => setQuietStart(e.target.value)} />
+        </label>
+        <label>
+          Quiet hours end
+          <input type="time" value={quietEnd} onChange={(e) => setQuietEnd(e.target.value)} />
+        </label>
+        <label>
+          Most nudges per day
+          <input
+            type="number"
+            min={0}
+            max={50}
+            value={cap}
+            onChange={(e) => setCap(Number(e.target.value))}
+          />
+        </label>
+        <div className="switches">
+          {Object.keys(SWITCH_LABELS).map((key) => (
+            <label key={key} className="switch">
+              <input
+                type="checkbox"
+                checked={switches[key] ?? true}
+                onChange={(e) => setSwitches({ ...switches, [key]: e.target.checked })}
+              />
+              {SWITCH_LABELS[key]}
+            </label>
+          ))}
+        </div>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {notice && <p className="muted small">{notice}</p>}
+        <button className="btn" type="submit" disabled={saving}>
+          {saving ? 'Saving…' : 'Save settings'}
         </button>
       </form>
     </section>

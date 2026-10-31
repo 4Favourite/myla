@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is in progress.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen) is in progress; scheduled summaries and nudges wait for the Android app.
 
 ## Principles
 
@@ -76,7 +76,7 @@ Each phase is small, tested on its own, and approved before the next begins.
 - **Phase 2, text dashboard:** done.
 - **Phase 3, orchestrator:** 3a chat only (done), 3b read-only task tool plus activity log (done), 3c task-changing tools with confirmation (done).
 - **Phase 4, reminders and the Android app:** 4a reminders saved in the database with honest delivery status (done); 4b Android shell (Capacitor) with local reminder alarms and device registration.
-- **Phase 5, memory and proactive jobs:** 5a memory tools and Memory screen (this step); 5b morning summary, nudges and settings.
+- **Phase 5, memory and proactive jobs:** 5a memory tools and Memory screen (done); 5b summary on request, new-chat button and a Settings screen (this step), then scheduled summaries and nudges once a device can deliver them.
 - **Phase 6, voice and minimized operation.**
 - **After that, in this order:** email, messages, other-app and browser control, calendar and contacts, desktop.
 
