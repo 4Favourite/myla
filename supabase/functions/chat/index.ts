@@ -24,6 +24,9 @@ const corsHeaders = {
 
 const MAX_TOOL_ROUNDS = 3
 
+// Shown in the dashboard so you can see which version of this function is running.
+const FUNCTION_VERSION = '5b-2'
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -622,7 +625,7 @@ What you cannot do yet: read email, messages or the calendar. If asked, say plai
 
 Reminders: saving a reminder is not the same as alerting the user. Read the delivery field in the set_reminder result. If it says no device is set up, tell the user plainly that the reminder is saved but nothing will alert them yet. Never say you will notify, ping or remind them unless the result says a device is registered. Reminder times need a date and a time; if unclear, ask.
 
-Memory: when the user states a preference or a fact about themselves, or asks you to remember something, call remember and tell them exactly what happened (saved, or waiting for their approval). Do not just say understood or noted without calling it. Projects and commitments are saved at once; anything else waits for the user's approval in the Memory section, so say which happened. A preference like wanting short answers can be followed in this conversation, but only say you will remember it if remember saved it. Never save passwords, card or ID numbers, or health details; if asked, say you will not store those. Use list_memory before answering what you remember about them, because the background list below may be incomplete. To delete a memory use forget, which asks the user to confirm.
+Memory: when the user states a preference or a fact about themselves, or asks you to remember something, call remember and tell them exactly what happened (saved, or waiting for their approval). Do not just say understood, got it or noted without calling it. Examples: the user says "I prefer short answers" and you call remember with kind preference and content "Prefers short answers"; the user says "I'm building a church website" and you call remember with kind project; the user says "Remember that I promised to call Sam on Friday" and you call remember with kind commitment. After the tool result, reply briefly, for example "Saved. It is waiting for your approval in Memory." Projects and commitments are saved at once; anything else waits for the user's approval in the Memory section, so say which happened. A preference like wanting short answers can be followed in this conversation, but only say you will remember it if remember saved it. Never save passwords, card or ID numbers, or health details; if asked, say you will not store those. Use list_memory before answering what you remember about them, because the background list below may be incomplete. To delete a memory use forget, which asks the user to confirm.
 
 Day summary: when asked for a summary of their day or a morning summary, call list_tasks for overdue and for today, and list_reminders for scheduled, then give a short friendly rundown: overdue first, then today, then reminders coming up. Give counts, and say plainly if nothing is due.
 
@@ -916,7 +919,7 @@ async function handle(req: Request): Promise<Response> {
         .insert({ conversation_id: convoId, role: 'assistant', content: text })
       if (saveError) console.error('Could not save the confirmation result:', saveError.message)
     }
-    return json({ conversation_id: convoId, reply: text, actions: [action] })
+    return json({ conversation_id: convoId, reply: text, actions: [action], version: FUNCTION_VERSION })
   }
 
   // 3. Conversation and the user's message
@@ -1004,7 +1007,7 @@ async function handle(req: Request): Promise<Response> {
     return json({ error: `The AI answered, but the reply could not be saved: ${saveReplyError.message}` }, 500)
   }
 
-  return json({ conversation_id: conversationId, reply, actions, confirmations })
+  return json({ conversation_id: conversationId, reply, actions, confirmations, version: FUNCTION_VERSION })
 }
 
 // Safety net: if anything unexpected throws, answer with a readable message

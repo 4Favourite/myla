@@ -4,6 +4,9 @@ import type { Session } from '@supabase/supabase-js'
 import { configError, supabase } from './lib/supabase'
 import './App.css'
 
+// Shown at the bottom of the page so you can tell which version you are looking at.
+const WEB_VERSION = '5b-2'
+
 type Task = {
   id: string
   title: string
@@ -445,6 +448,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [sending, setSending] = useState(false)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [functionVersion, setFunctionVersion] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
   // Load the latest conversation from the database.
@@ -530,6 +534,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         conversation_id?: string
         actions?: ChatAction[]
         confirmations?: Confirmation[]
+        version?: string
       } | null
       if (!result?.reply) {
         setMessages((current) => current.filter((m) => m.id !== pendingId))
@@ -538,6 +543,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         return
       }
       const replyText = result.reply
+      if (result.version) setFunctionVersion(result.version)
       if (result.conversation_id) setConversationId(result.conversation_id)
       setMessages((current) => [
         ...current,
@@ -681,6 +687,9 @@ function Chat({ onActivity }: { onActivity: () => void }) {
           </button>
         </form>
       </div>
+      <p className="muted small">
+        Website version {WEB_VERSION} · Chat function version {functionVersion ?? 'not used yet'}
+      </p>
     </section>
   )
 }
