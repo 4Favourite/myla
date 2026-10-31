@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen) is in progress; scheduled summaries and nudges wait for the Android app.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen, past chats list, timezone dropdown) is done; scheduled summaries and nudges wait for the Android app.
 
 ## Principles
 

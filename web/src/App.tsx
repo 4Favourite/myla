@@ -5,7 +5,7 @@ import { configError, supabase } from './lib/supabase'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '5b-2'
+const WEB_VERSION = '5c'
 
 type Task = {
   id: string
@@ -398,6 +398,12 @@ type Confirmation = {
   description: string
 }
 
+type ChatSummary = {
+  id: string
+  title: string | null
+  created_at: string
+}
+
 type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
@@ -449,7 +455,47 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [functionVersion, setFunctionVersion] = useState<string | null>(null)
+  const [chats, setChats] = useState<ChatSummary[]>([])
+  const [showChats, setShowChats] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+
+  // The list of past chats, newest first.
+  const loadChats = useCallback(async () => {
+    const { data, error: chatsError } = await supabase
+      .from('conversations')
+      .select('id, title, created_at')
+      .order('created_at', { ascending: false })
+      .limit(30)
+    if (chatsError) {
+      setError(`Could not load your past chats: ${chatsError.message}`)
+    } else {
+      setChats((data ?? []) as ChatSummary[])
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadChats()
+  }, [loadChats])
+
+  // Open one of the past chats.
+  async function openChat(id: string) {
+    if (sending) return
+    setError(null)
+    const { data: rows, error: rowsError } = await supabase
+      .from('messages')
+      .select('id, role, content')
+      .eq('conversation_id', id)
+      .in('role', ['user', 'assistant'])
+      .order('created_at', { ascending: true })
+      .limit(100)
+    if (rowsError) {
+      setError(`Could not open that chat: ${rowsError.message}`)
+      return
+    }
+    setConversationId(id)
+    setMessages((rows ?? []) as ChatMessage[])
+    setShowChats(false)
+  }
 
   // Load the latest conversation from the database.
   useEffect(() => {
@@ -561,6 +607,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
     } finally {
       setSending(false)
+      void loadChats()
       onActivity()
     }
   }
@@ -600,6 +647,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
     } finally {
       setSending(false)
+      void loadChats()
       onActivity()
     }
   }
@@ -673,7 +721,41 @@ function Chat({ onActivity }: { onActivity: () => void }) {
           <button type="button" className="btn ghost small" disabled={sending} onClick={startNew}>
             New chat
           </button>
+          <button
+            type="button"
+            className="btn ghost small"
+            onClick={() => setShowChats((v) => !v)}
+          >
+            {showChats ? 'Hide past chats' : `Past chats (${chats.length})`}
+          </button>
         </div>
+        {showChats && (
+          <ul className="list chats">
+            {chats.length === 0 ? (
+              <li className="muted small">No past chats yet.</li>
+            ) : (
+              chats.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    className={c.id === conversationId ? 'chat-item current' : 'chat-item'}
+                    onClick={() => void openChat(c.id)}
+                  >
+                    <span className="title">{c.title || 'Untitled chat'}</span>
+                    <span className="due">
+                      {new Date(c.created_at).toLocaleString([], {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+        )}
         <form className="chat-form" onSubmit={send}>
           <input
             aria-label="Message Myla"
@@ -1023,6 +1105,25 @@ const SWITCH_LABELS: Record<string, string> = {
   suggestions: 'Suggestions',
 }
 
+// Every timezone this browser knows, plus UTC and whatever is currently saved.
+function timezoneOptions(current: string): string[] {
+  let zones: string[] = []
+  try {
+    const intl = Intl as unknown as { supportedValuesOf?: (key: string) => string[] }
+    if (typeof intl.supportedValuesOf === 'function') zones = intl.supportedValuesOf('timeZone')
+  } catch {
+    // fall back to the short list below
+  }
+  if (zones.length === 0) {
+    zones = ['Africa/Lagos', 'Africa/Nairobi', 'Africa/Johannesburg', 'Europe/London', 'Europe/Madrid',
+      'America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Asia/Dubai', 'Asia/Kolkata',
+      'Asia/Singapore', 'Australia/Sydney']
+  }
+  const all = new Set<string>(['UTC', ...zones])
+  if (current) all.add(current)
+  return [...all].sort()
+}
+
 // Quiet hours, summary time, nudge limit and per-feature switches.
 // They are stored now. Nothing uses them yet: they apply once your phone delivers alerts.
 function Settings() {
@@ -1032,6 +1133,7 @@ function Settings() {
   const [quietEnd, setQuietEnd] = useState('')
   const [cap, setCap] = useState(5)
   const [switches, setSwitches] = useState<Record<string, boolean>>(DEFAULT_SWITCHES)
+  const zoneOptions = useMemo(() => timezoneOptions(timezone), [timezone])
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1109,7 +1211,13 @@ function Settings() {
       <form className="card settings" onSubmit={save}>
         <label>
           Timezone
-          <input value={timezone} onChange={(e) => setTimezone(e.target.value)} />
+          <select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+            {zoneOptions.map((zone) => (
+              <option key={zone} value={zone}>
+                {zone}
+              </option>
+            ))}
+          </select>
         </label>
         <label>
           Morning summary time
