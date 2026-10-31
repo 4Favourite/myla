@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is in progress.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is in progress.
 
 ## Principles
 
@@ -59,7 +59,7 @@ Keys: `web/.env` holds only the project URL and the anon/publishable key. It is 
 
 The `chat` function (`supabase/functions/chat/index.ts`) checks you are signed in, saves your message, asks the AI model (Groq) for a reply, saves it, and returns it.
 
-From 3b it also has a tool registry. Tools so far: `list_tasks` (tier 1), `add_task`, `update_task` and `complete_task` (tier 3, run immediately and are logged), and `delete_task` (tier 4). Every tool use is written to the `tool_calls` activity log before it runs, using a backend-only key; if the log cannot be written, the tool does not run. Tier 4 actions never run on the AI's say-so: the function holds the request as `awaiting_confirmation`, the dashboard shows a Confirm and Cancel card, and only the user's explicit yes (answered within 10 minutes, once) runs it. The dashboard shows what was actually done under each reply and in a read-only Recent activity panel.
+From 3b it also has a tool registry. Tools so far: `list_tasks` (tier 1), `add_task`, `update_task` and `complete_task` (tier 3, run immediately and are logged), `delete_task` (tier 4), and the reminder tools `set_reminder`, `list_reminders` and `cancel_reminder`, and the memory tools `remember`, `list_memory` and `forget` (tier 4, confirmed like deletes). Projects and commitments are saved at once; other memory waits for approval in the dashboard's Memory section. Saved memory is added to Myla's instructions as background. A saved reminder is not the same as an alert: until a device (the Android app, Phase 4b) is registered, Myla says plainly that nothing will notify you. Every tool use is written to the `tool_calls` activity log before it runs, using a backend-only key; if the log cannot be written, the tool does not run. Tier 4 actions never run on the AI's say-so: the function holds the request as `awaiting_confirmation`, the dashboard shows a Confirm and Cancel card, and only the user's explicit yes (answered within 10 minutes, once) runs it. The dashboard shows what was actually done under each reply and in a read-only Recent activity panel.
 
 Setup, all in the Supabase dashboard (nothing secret goes in the repo):
 
@@ -74,9 +74,9 @@ Each phase is small, tested on its own, and approved before the next begins.
 - **Phase 0, feasibility tests (needs Android Studio):** prove on the real phone that a voice service survives being minimized and that a reminder fires on time with the app closed.
 - **Phase 1, database foundation:** done.
 - **Phase 2, text dashboard:** done.
-- **Phase 3, orchestrator:** 3a chat only (done), 3b read-only task tool plus activity log (done), 3c task-changing tools with confirmation (this step).
-- **Phase 4, Android app:** native shell, local reminder alarms, push.
-- **Phase 5, memory and proactive jobs:** memory screen, morning summary, nudges.
+- **Phase 3, orchestrator:** 3a chat only (done), 3b read-only task tool plus activity log (done), 3c task-changing tools with confirmation (done).
+- **Phase 4, reminders and the Android app:** 4a reminders saved in the database with honest delivery status (done); 4b Android shell (Capacitor) with local reminder alarms and device registration.
+- **Phase 5, memory and proactive jobs:** 5a memory tools and Memory screen (this step); 5b morning summary, nudges and settings.
 - **Phase 6, voice and minimized operation.**
 - **After that, in this order:** email, messages, other-app and browser control, calendar and contacts, desktop.
 

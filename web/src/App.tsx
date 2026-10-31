@@ -314,6 +314,8 @@ function Dashboard({ email }: { email: string }) {
         </>
       )}
 
+      <Reminders version={activityVersion} />
+
       <Chat
         onActivity={() => {
           setActivityVersion((v) => v + 1)
@@ -322,6 +324,8 @@ function Dashboard({ email }: { email: string }) {
       />
 
       <Activity version={activityVersion} />
+
+      <Memory version={activityVersion} />
 
       <p className="muted small updated">
         {loadedAt
@@ -725,6 +729,246 @@ function Activity({ version }: { version: number }) {
           ))}
         </ul>
       )}
+    </section>
+  )
+}
+
+type Reminder = {
+  id: string
+  title: string
+  remind_at: string
+}
+
+// Reminders that are saved and still waiting. Saving a reminder does not mean a
+// device will alert you, so this section says plainly when none is set up.
+function Reminders({ version }: { version: number }) {
+  const [items, setItems] = useState<Reminder[]>([])
+  const [hasDevice, setHasDevice] = useState<boolean | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const [remindersResult, devicesResult] = await Promise.all([
+      supabase
+        .from('reminders')
+        .select('id, title, remind_at')
+        .eq('status', 'scheduled')
+        .order('remind_at', { ascending: true })
+        .limit(20),
+      supabase.from('devices').select('id', { count: 'exact', head: true }),
+    ])
+    if (remindersResult.error) {
+      setError(`Could not load reminders: ${remindersResult.error.message}`)
+    } else {
+      setError(null)
+      setItems((remindersResult.data ?? []) as Reminder[])
+    }
+    setHasDevice(devicesResult.error ? null : (devicesResult.count ?? 0) > 0)
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load, version])
+
+  async function cancel(item: Reminder) {
+    const { data, error: cancelError } = await supabase
+      .from('reminders')
+      .update({ status: 'cancelled' })
+      .eq('id', item.id)
+      .eq('status', 'scheduled')
+      .select('id')
+    if (cancelError) {
+      setError(`Could not cancel the reminder: ${cancelError.message}`)
+    } else if (!data || data.length === 0) {
+      setError('The reminder was not cancelled. Nothing changed.')
+    } else {
+      await load()
+    }
+  }
+
+  if (items.length === 0 && !error) return null
+
+  return (
+    <section className="section">
+      <h2>Reminders</h2>
+      {hasDevice === false && (
+        <p className="muted small">
+          No phone is set up to alert you yet, so these are saved but will not notify you.
+        </p>
+      )}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      <ul className="list">
+        {items.map((item) => {
+          const passed = new Date(item.remind_at).getTime() < Date.now()
+          return (
+            <li key={item.id} className="task">
+              <div className="task-body">
+                <span className="title">{item.title}</span>
+                <span className={passed ? 'due overdue' : 'due'}>
+                  {formatDue(item.remind_at)}
+                  {passed ? ' · time passed, not delivered' : ''}
+                </span>
+              </div>
+              <button className="btn ghost small" onClick={() => void cancel(item)}>
+                Cancel
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
+type MemoryItem = {
+  id: string
+  content: string
+  kind: string
+  status: 'active' | 'pending'
+}
+
+// Everything Myla remembers about you. You can add, approve, reject and delete.
+// Projects and commitments are saved at once; anything else waits here for your yes.
+function Memory({ version }: { version: number }) {
+  const [items, setItems] = useState<MemoryItem[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    const { data, error: loadError } = await supabase
+      .from('memory_items')
+      .select('id, content, kind, status')
+      .order('created_at', { ascending: false })
+      .limit(100)
+    if (loadError) {
+      setError(`Could not load memory: ${loadError.message}`)
+    } else {
+      setError(null)
+      setItems((data ?? []) as MemoryItem[])
+    }
+    setLoaded(true)
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load, version])
+
+  async function add(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const content = draft.trim()
+    if (!content) return
+    setSaving(true)
+    try {
+      const { error: insertError } = await supabase
+        .from('memory_items')
+        .insert({ content, kind: 'fact', status: 'active', source: 'stated' })
+      if (insertError) {
+        setError(`Could not save: ${insertError.message}`)
+      } else {
+        setDraft('')
+        await load()
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function approve(item: MemoryItem) {
+    const { data, error: updateError } = await supabase
+      .from('memory_items')
+      .update({ status: 'active' })
+      .eq('id', item.id)
+      .eq('status', 'pending')
+      .select('id')
+    if (updateError) setError(`Could not approve: ${updateError.message}`)
+    else if (!data || data.length === 0) setError('Nothing was approved. Nothing changed.')
+    else await load()
+  }
+
+  async function remove(item: MemoryItem) {
+    if (item.status === 'active' && !window.confirm(`Forget "${item.content}"? This cannot be undone.`)) return
+    const { data, error: deleteError } = await supabase
+      .from('memory_items')
+      .delete()
+      .eq('id', item.id)
+      .select('id')
+    if (deleteError) setError(`Could not delete: ${deleteError.message}`)
+    else if (!data || data.length === 0) setError('Nothing was deleted. Nothing changed.')
+    else await load()
+  }
+
+  const pending = items.filter((m) => m.status === 'pending')
+  const active = items.filter((m) => m.status === 'active')
+
+  return (
+    <section className="section">
+      <h2>Memory</h2>
+      <p className="muted small">
+        What Myla remembers about you. Projects and commitments are saved at once. Anything else waits
+        here for your approval.
+      </p>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {pending.length > 0 && (
+        <>
+          <p className="small">Waiting for your approval</p>
+          <ul className="list">
+            {pending.map((m) => (
+              <li key={m.id} className="task">
+                <div className="task-body">
+                  <span className="title">{m.content}</span>
+                  <span className="due">{m.kind}</span>
+                </div>
+                <button className="btn small" onClick={() => void approve(m)}>
+                  Approve
+                </button>
+                <button className="btn ghost small" onClick={() => void remove(m)}>
+                  Reject
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {loaded && active.length === 0 && pending.length === 0 ? (
+        <p className="muted">Nothing saved yet.</p>
+      ) : (
+        <ul className="list">
+          {active.map((m) => (
+            <li key={m.id} className="task">
+              <div className="task-body">
+                <span className="title">{m.content}</span>
+                <span className="due">{m.kind}</span>
+              </div>
+              <button className="btn ghost small" onClick={() => void remove(m)}>
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <form className="card add" onSubmit={add}>
+        <input
+          aria-label="Add something for Myla to remember"
+          placeholder="Add something for Myla to remember…"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <button className="btn" type="submit" disabled={saving || !draft.trim()}>
+          {saving ? 'Saving…' : 'Add to memory'}
+        </button>
+      </form>
     </section>
   )
 }
