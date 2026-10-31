@@ -67,6 +67,10 @@ Setup, all in the Supabase dashboard (nothing secret goes in the repo):
 2. Create an Edge Function named exactly `chat` and paste in the code from `supabase/functions/chat/index.ts`.
 3. Turn off the function's JWT verification setting. The code verifies the signed-in user itself.
 
+## Voice (6a)
+
+The chat has a Talk button (tap, speak, it stops when you stop and sends what it heard), an option to read replies aloud with a voice you choose, and a Stop talking button. Talking over Myla stops her. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
+
 ## Phase 4b: the Android app
 
 The same dashboard runs inside an Android app made with Capacitor. Inside the app, a "This phone" panel asks for notification permission, registers the phone in the `devices` table, and schedules a local alarm for every saved reminder using the plugin `@capacitor/local-notifications`. It reads back what is really scheduled and shows it. A reminder is marked delivered only with evidence (its notification is in the tray, or the app saw it arrive or be tapped).

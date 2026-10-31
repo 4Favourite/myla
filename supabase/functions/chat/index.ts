@@ -25,7 +25,7 @@ const corsHeaders = {
 const MAX_TOOL_ROUNDS = 3
 
 // Shown in the dashboard so you can see which version of this function is running.
-const FUNCTION_VERSION = '5b-2'
+const FUNCTION_VERSION = '6a'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -834,7 +834,13 @@ async function handle(req: Request): Promise<Response> {
   const userId = userData.user.id
 
   // 2. Read the request
-  let body: { message?: unknown; conversation_id?: unknown; client?: unknown; confirm?: unknown }
+  let body: {
+    message?: unknown
+    conversation_id?: unknown
+    client?: unknown
+    confirm?: unknown
+    input_mode?: unknown
+  }
   try {
     body = await req.json()
   } catch {
@@ -937,7 +943,12 @@ async function handle(req: Request): Promise<Response> {
 
   const { error: saveUserError } = await db
     .from('messages')
-    .insert({ conversation_id: conversationId, role: 'user', content: message, input_mode: 'text' })
+    .insert({
+      conversation_id: conversationId,
+      role: 'user',
+      content: message,
+      input_mode: body.input_mode === 'voice' ? 'voice' : 'text',
+    })
   if (saveUserError) {
     return json({ error: `Could not save your message: ${saveUserError.message}` }, 500)
   }

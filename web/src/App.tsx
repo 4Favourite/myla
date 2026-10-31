@@ -14,7 +14,7 @@ import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '5d'
+const WEB_VERSION = '6a'
 
 type Task = {
   id: string
@@ -414,6 +414,66 @@ type Confirmation = {
   description: string
 }
 
+// Voice: the browser's own speech recognition and speech voices. Free, but quality
+// varies, and the browser usually sends your audio to its maker's speech service.
+type SpeechResultLike = { isFinal: boolean; 0: { transcript: string } }
+type SpeechEventLike = { resultIndex: number; results: ArrayLike<SpeechResultLike> }
+type RecognitionLike = {
+  lang: string
+  interimResults: boolean
+  continuous: boolean
+  onresult: ((event: SpeechEventLike) => void) | null
+  onerror: ((event: { error: string }) => void) | null
+  onend: (() => void) | null
+  start: () => void
+  stop: () => void
+}
+type RecognitionCtor = new () => RecognitionLike
+
+function getRecognitionCtor(): RecognitionCtor | null {
+  const w = window as unknown as {
+    SpeechRecognition?: RecognitionCtor
+    webkitSpeechRecognition?: RecognitionCtor
+  }
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
+}
+
+function voiceErrorText(code: string): string {
+  if (code === 'not-allowed' || code === 'service-not-allowed') {
+    return 'The microphone is blocked. Allow it in the site settings, then try again.'
+  }
+  if (code === 'no-speech') return 'I did not hear anything. Tap Talk and try again.'
+  if (code === 'audio-capture') return 'No microphone was found.'
+  if (code === 'network') return 'The speech service could not be reached.'
+  return `Voice input problem: ${code}`
+}
+
+// A best guess at a natural female voice. You can always pick another.
+function preferredVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | undefined {
+  const english = voices.filter((v) => v.lang.toLowerCase().startsWith('en'))
+  const pool = english.length > 0 ? english : voices
+  return (
+    pool.find((v) => /female|zira|samantha|aria|jenny|libby|sonia|hazel|susan|karen|moira|tessa|fiona|victoria/i.test(v.name)) ??
+    pool[0]
+  )
+}
+
+function readSetting(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeSetting(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // not available: the choice just will not be remembered
+  }
+}
+
 type ChatSummary = {
   id: string
   title: string | null
@@ -474,6 +534,14 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [showChats, setShowChats] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+  const recognitionRef = useRef<RecognitionLike | null>(null)
+  const voiceSupported = getRecognitionCtor() !== null
+  const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
+  const [listening, setListening] = useState(false)
+  const [heard, setHeard] = useState('')
+  const [speakReplies, setSpeakReplies] = useState(() => readSetting('myla.speak') === '1')
+  const [voiceName, setVoiceName] = useState(() => readSetting('myla.voice') ?? '')
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
 
   // The list of past chats, newest first.
   const loadChats = useCallback(async () => {
@@ -564,6 +632,75 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     void sendText(draft.trim())
   }
 
+  // The list of voices this device offers (it can fill in a moment after loading).
+  useEffect(() => {
+    if (!speechSupported) return
+    const load = () => setVoices(window.speechSynthesis.getVoices())
+    load()
+    window.speechSynthesis.addEventListener('voiceschanged', load)
+    return () => window.speechSynthesis.removeEventListener('voiceschanged', load)
+  }, [speechSupported])
+
+  function stopSpeaking() {
+    if (speechSupported) window.speechSynthesis.cancel()
+  }
+
+  function speak(text: string) {
+    if (!speechSupported || !speakReplies) return
+    window.speechSynthesis.cancel()
+    const utterance = new SpeechSynthesisUtterance(text)
+    const chosen = voices.find((v) => v.name === voiceName) ?? preferredVoice(voices)
+    if (chosen) {
+      utterance.voice = chosen
+      utterance.lang = chosen.lang
+    }
+    window.speechSynthesis.speak(utterance)
+  }
+
+  // Tap to talk. It stops by itself when you stop speaking, then sends what it heard.
+  function toggleListening() {
+    if (listening) {
+      recognitionRef.current?.stop()
+      return
+    }
+    const Ctor = getRecognitionCtor()
+    if (!Ctor || sending) return
+    stopSpeaking() // talking over Myla interrupts her
+    const recognition = new Ctor()
+    recognition.lang = navigator.language || 'en-US'
+    recognition.interimResults = true
+    recognition.continuous = false
+    let finalText = ''
+    recognition.onresult = (event) => {
+      let interimText = ''
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i]
+        if (result.isFinal) finalText += result[0].transcript
+        else interimText += result[0].transcript
+      }
+      setHeard((finalText + interimText).trim())
+    }
+    recognition.onerror = (event) => {
+      if (event.error !== 'aborted') setError(voiceErrorText(event.error))
+    }
+    recognition.onend = () => {
+      setListening(false)
+      setHeard('')
+      recognitionRef.current = null
+      const said = finalText.trim()
+      if (said) void sendText(said, 'voice')
+    }
+    recognitionRef.current = recognition
+    setError(null)
+    setListening(true)
+    try {
+      recognition.start()
+    } catch {
+      setListening(false)
+      setError('Could not start the microphone.')
+    }
+  }
+
   // Start a fresh conversation. The next message creates a new one.
   function startNew() {
     if (sending) return
@@ -573,8 +710,9 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     setDraft('')
   }
 
-  async function sendText(text: string) {
+  async function sendText(text: string, mode: 'text' | 'voice' = 'text') {
     if (!text || sending) return
+    stopSpeaking()
     setSending(true)
     setError(null)
     const pendingId = `pending-${Date.now()}`
@@ -582,7 +720,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     setDraft('')
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('chat', {
-        body: { message: text, conversation_id: conversationId, client: localClientTime() },
+        body: { message: text, conversation_id: conversationId, client: localClientTime(), input_mode: mode },
       })
       if (invokeError) {
         // Put the message back so nothing is lost, and say what went wrong.
@@ -605,6 +743,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         return
       }
       const replyText = result.reply
+      speak(replyText)
       if (result.version) setFunctionVersion(result.version)
       if (result.conversation_id) setConversationId(result.conversation_id)
       setMessages((current) => [
@@ -772,6 +911,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
             )}
           </ul>
         )}
+        {listening && <p className="muted small">Listening… {heard}</p>}
         <form className="chat-form" onSubmit={send}>
           <input
             aria-label="Message Myla"
@@ -780,10 +920,62 @@ function Chat({ onActivity }: { onActivity: () => void }) {
             onChange={(e) => setDraft(e.target.value)}
             disabled={sending}
           />
+          <button
+            type="button"
+            className={listening ? 'btn small recording' : 'btn ghost small'}
+            disabled={sending || !voiceSupported}
+            onClick={toggleListening}
+          >
+            {listening ? 'Stop' : 'Talk'}
+          </button>
           <button className="btn" type="submit" disabled={sending || !draft.trim()}>
             Send
           </button>
         </form>
+        <div className="voice-options">
+          {speechSupported && (
+            <>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={speakReplies}
+                  onChange={(e) => {
+                    setSpeakReplies(e.target.checked)
+                    writeSetting('myla.speak', e.target.checked ? '1' : '0')
+                    if (!e.target.checked) stopSpeaking()
+                  }}
+                />
+                Read replies aloud
+              </label>
+              {speakReplies && voices.length > 0 && (
+                <select
+                  aria-label="Voice"
+                  value={voiceName || preferredVoice(voices)?.name || ''}
+                  onChange={(e) => {
+                    setVoiceName(e.target.value)
+                    writeSetting('myla.voice', e.target.value)
+                  }}
+                >
+                  {voices.map((v) => (
+                    <option key={`${v.name}-${v.lang}`} value={v.name}>
+                      {v.name} ({v.lang})
+                    </option>
+                  ))}
+                </select>
+              )}
+              {speakReplies && (
+                <button type="button" className="btn ghost small" onClick={stopSpeaking}>
+                  Stop talking
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        <p className="muted small">
+          {voiceSupported
+            ? 'Voice input usually sends your audio to your browser maker’s speech service. Voices vary by device.'
+            : 'Voice input is not available in this browser or app yet.'}
+        </p>
       </div>
       <p className="muted small">
         Website version {WEB_VERSION} · Chat function version {functionVersion ?? 'not used yet'}
