@@ -14,7 +14,69 @@ import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '6b'
+const WEB_VERSION = '6c'
+
+type Tab = 'today' | 'chat' | 'reminders' | 'memory' | 'more'
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'today', label: 'Today' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'reminders', label: 'Reminders' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'more', label: 'More' },
+]
+
+function TabIcon({ tab }: { tab: Tab }) {
+  const common = {
+    viewBox: '0 0 24 24',
+    width: 22,
+    height: 22,
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true,
+  }
+  if (tab === 'today') {
+    return (
+      <svg {...common}>
+        <path d="M3 11l9-8 9 8" />
+        <path d="M5 10v10h14V10" />
+      </svg>
+    )
+  }
+  if (tab === 'chat') {
+    return (
+      <svg {...common}>
+        <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />
+      </svg>
+    )
+  }
+  if (tab === 'reminders') {
+    return (
+      <svg {...common}>
+        <path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8" />
+        <path d="M13.7 20a2 2 0 0 1-3.4 0" />
+      </svg>
+    )
+  }
+  if (tab === 'memory') {
+    return (
+      <svg {...common}>
+        <path d="M4 4h12a4 4 0 0 1 4 4v12H8a4 4 0 0 1-4-4z" />
+        <path d="M4 16a4 4 0 0 1 4-4h12" />
+      </svg>
+    )
+  }
+  return (
+    <svg {...common}>
+      <line x1="4" y1="7" x2="20" y2="7" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="17" x2="20" y2="17" />
+    </svg>
+  )
+}
 
 type Task = {
   id: string
@@ -147,6 +209,18 @@ function Dashboard({ email }: { email: string }) {
   const [newDue, setNewDue] = useState('')
   const [saving, setSaving] = useState(false)
   const [activityVersion, setActivityVersion] = useState(0)
+  const [tab, setTab] = useState<Tab>('today')
+  const [displayName, setDisplayName] = useState('')
+
+  // What you asked Myla to call you (a setting).
+  const loadName = useCallback(async () => {
+    const { data } = await supabase.from('settings').select('display_name').maybeSingle()
+    setDisplayName(typeof data?.display_name === 'string' ? data.display_name : '')
+  }, [])
+
+  useEffect(() => {
+    void loadName()
+  }, [loadName])
 
   // Always reads from the database, so what you see is what is stored.
   const load = useCallback(async () => {
@@ -268,12 +342,17 @@ function Dashboard({ email }: { email: string }) {
     day: 'numeric',
   })
 
+  const openCount = groups.overdue.length + groups.today.length + groups.upcoming.length + groups.undated.length
+
   return (
     <main className="shell">
-      <header className="head">
+      <header className="hero">
         <div>
-          <h1>{greeting()}</h1>
-          <p className="muted">{todayLabel}</p>
+          <p className="hero-date">{todayLabel}</p>
+          <h1>
+            {greeting()}
+            {displayName ? `, ${displayName}` : ''}
+          </h1>
         </div>
         <div className="head-actions">
           <span className="muted small">{email}</span>
@@ -289,74 +368,108 @@ function Dashboard({ email }: { email: string }) {
         </p>
       )}
 
-      <form className="card add" onSubmit={addTask}>
-        <input
-          aria-label="New task"
-          placeholder="Add a task…"
-          value={newTitle}
-          onChange={(e) => setNewTitle(e.target.value)}
-        />
-        <input
-          aria-label="Due date and time (optional)"
-          type="datetime-local"
-          min="2000-01-01T00:00"
-          max="2100-12-31T23:59"
-          value={newDue}
-          onChange={(e) => setNewDue(e.target.value)}
-        />
-        <button className="btn" type="submit" disabled={saving || !newTitle.trim()}>
-          {saving ? 'Saving…' : 'Add'}
-        </button>
-      </form>
+      <div hidden={tab !== 'today'}>
+        <div className="tiles">
+          <div className="tile tile-warn">
+            <span className="tile-number">{groups.overdue.length}</span>
+            <span className="tile-label">Overdue</span>
+          </div>
+          <div className="tile">
+            <span className="tile-number">{groups.today.length}</span>
+            <span className="tile-label">Due today</span>
+          </div>
+          <div className="tile">
+            <span className="tile-number">{openCount}</span>
+            <span className="tile-label">Open tasks</span>
+          </div>
+        </div>
 
-      {loading ? (
-        <p className="muted">Loading your tasks…</p>
-      ) : (
-        <>
-          <Section title="Overdue" tasks={groups.overdue} overdue onToggle={toggleTask} onDelete={deleteTask} />
-          <Section
-            title="Today"
-            tasks={groups.today}
-            emptyText="Nothing is due today."
-            onToggle={toggleTask}
-            onDelete={deleteTask}
+        <form className="card add" onSubmit={addTask}>
+          <input
+            aria-label="New task"
+            placeholder="Add a task…"
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
           />
-          <Section title="Upcoming" tasks={groups.upcoming} onToggle={toggleTask} onDelete={deleteTask} />
-          <Section title="No date" tasks={groups.undated} onToggle={toggleTask} onDelete={deleteTask} />
-          <Section title="Done recently" tasks={groups.done} onToggle={toggleTask} onDelete={deleteTask} />
-        </>
-      )}
+          <input
+            aria-label="Due date and time (optional)"
+            type="datetime-local"
+            min="2000-01-01T00:00"
+            max="2100-12-31T23:59"
+            value={newDue}
+            onChange={(e) => setNewDue(e.target.value)}
+          />
+          <button className="btn" type="submit" disabled={saving || !newTitle.trim()}>
+            {saving ? 'Saving…' : 'Add'}
+          </button>
+        </form>
 
-      {isNative && (
-        <PhoneSetup
-          version={activityVersion}
-          onChange={() => setActivityVersion((v) => v + 1)}
+        {loading ? (
+          <p className="muted">Loading your tasks…</p>
+        ) : (
+          <>
+            <Section title="Overdue" tasks={groups.overdue} overdue onToggle={toggleTask} onDelete={deleteTask} />
+            <Section
+              title="Today"
+              tasks={groups.today}
+              emptyText="Nothing is due today."
+              onToggle={toggleTask}
+              onDelete={deleteTask}
+            />
+            <Section title="Upcoming" tasks={groups.upcoming} onToggle={toggleTask} onDelete={deleteTask} />
+            <Section title="No date" tasks={groups.undated} onToggle={toggleTask} onDelete={deleteTask} />
+            <Section title="Done recently" tasks={groups.done} onToggle={toggleTask} onDelete={deleteTask} />
+          </>
+        )}
+
+        <p className="muted small updated">
+          {loadedAt
+            ? `Last loaded ${loadedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}. `
+            : ''}
+          <button className="link" onClick={() => void load()}>
+            Refresh
+          </button>
+        </p>
+      </div>
+
+      <div hidden={tab !== 'chat'}>
+        <Chat
+          onActivity={() => {
+            setActivityVersion((v) => v + 1)
+            void load()
+          }}
         />
-      )}
+      </div>
 
-      <Reminders version={activityVersion} />
+      <div hidden={tab !== 'reminders'}>
+        {isNative && (
+          <PhoneSetup version={activityVersion} onChange={() => setActivityVersion((v) => v + 1)} />
+        )}
+        <Reminders version={activityVersion} />
+      </div>
 
-      <Chat
-        onActivity={() => {
-          setActivityVersion((v) => v + 1)
-          void load()
-        }}
-      />
+      <div hidden={tab !== 'memory'}>
+        <Memory version={activityVersion} />
+      </div>
 
-      <Activity version={activityVersion} />
+      <div hidden={tab !== 'more'}>
+        <Settings onSaved={() => void loadName()} />
+        <Activity version={activityVersion} />
+      </div>
 
-      <Memory version={activityVersion} />
-
-      <Settings />
-
-      <p className="muted small updated">
-        {loadedAt
-          ? `Last loaded ${loadedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}. `
-          : ''}
-        <button className="link" onClick={() => void load()}>
-          Refresh
-        </button>
-      </p>
+      <nav className="tabbar" aria-label="Main">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={t.id === tab ? 'tab current' : 'tab'}
+            onClick={() => setTab(t.id)}
+            aria-current={t.id === tab ? 'page' : undefined}
+          >
+            <TabIcon tab={t.id} />
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </nav>
     </main>
   )
 }
@@ -543,6 +656,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [functionVersion, setFunctionVersion] = useState<string | null>(null)
+  const [answeredBy, setAnsweredBy] = useState<string | null>(null)
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [showChats, setShowChats] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
@@ -837,6 +951,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         actions?: ChatAction[]
         confirmations?: Confirmation[]
         version?: string
+        model?: string
       } | null
       if (!result?.reply) {
         setMessages((current) => current.filter((m) => m.id !== pendingId))
@@ -847,6 +962,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       const replyText = result.reply
       speak(replyText)
       if (result.version) setFunctionVersion(result.version)
+      if (result.model) setAnsweredBy(result.model)
       if (result.conversation_id) setConversationId(result.conversation_id)
       setMessages((current) => [
         ...current,
@@ -1142,6 +1258,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       </div>
       <p className="muted small">
         Website version {WEB_VERSION} · Chat function version {functionVersion ?? 'not used yet'}
+        {answeredBy ? ` · Last answer from ${answeredBy}` : ''}
       </p>
     </section>
   )
@@ -1275,11 +1392,12 @@ function Reminders({ version }: { version: number }) {
     }
   }
 
-  if (items.length === 0 && !error) return null
-
   return (
     <section className="section">
       <h2>Reminders</h2>
+      {items.length === 0 && !error && (
+        <p className="muted">No reminders waiting. Ask Myla to remind you of something.</p>
+      )}
       {hasDevice === false && (
         <p className="muted small">
           No phone is set up to alert you yet, so these are saved but will not notify you.
@@ -1545,8 +1663,9 @@ function timezoneOptions(current: string): string[] {
 
 // Quiet hours, summary time, nudge limit and per-feature switches.
 // They are stored now. Nothing uses them yet: they apply once your phone delivers alerts.
-function Settings() {
+function Settings({ onSaved }: { onSaved: () => void }) {
   const [timezone, setTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
+  const [displayName, setDisplayName] = useState('')
   const [morning, setMorning] = useState('')
   const [quietStart, setQuietStart] = useState('')
   const [quietEnd, setQuietEnd] = useState('')
@@ -1560,7 +1679,7 @@ function Settings() {
   const load = useCallback(async () => {
     const { data, error: loadError } = await supabase
       .from('settings')
-      .select('timezone, morning_summary_time, quiet_hours_start, quiet_hours_end, nudge_daily_cap, switches')
+      .select('timezone, display_name, morning_summary_time, quiet_hours_start, quiet_hours_end, nudge_daily_cap, switches')
       .maybeSingle()
     if (loadError) {
       setError(`Could not load settings: ${loadError.message}`)
@@ -1568,6 +1687,7 @@ function Settings() {
     }
     if (data) {
       setTimezone(data.timezone ?? 'UTC')
+      setDisplayName(typeof data.display_name === 'string' ? data.display_name : '')
       setMorning((data.morning_summary_time ?? '').slice(0, 5))
       setQuietStart((data.quiet_hours_start ?? '').slice(0, 5))
       setQuietEnd((data.quiet_hours_end ?? '').slice(0, 5))
@@ -1601,6 +1721,7 @@ function Settings() {
         {
           user_id: userData.user.id,
           timezone: timezone.trim() || 'UTC',
+          display_name: displayName.trim() || null,
           morning_summary_time: morning || null,
           quiet_hours_start: quietStart || null,
           quiet_hours_end: quietEnd || null,
@@ -1614,6 +1735,7 @@ function Settings() {
       } else {
         await load() // show what the database now holds
         setNotice('Saved.')
+        onSaved()
       }
     } finally {
       setSaving(false)
@@ -1628,6 +1750,15 @@ function Settings() {
         summaries.
       </p>
       <form className="card settings" onSubmit={save}>
+        <label>
+          What Myla calls you
+          <input
+            value={displayName}
+            maxLength={60}
+            placeholder="For example: Mr. Favourite"
+            onChange={(e) => setDisplayName(e.target.value)}
+          />
+        </label>
         <label>
           Timezone
           <select value={timezone} onChange={(e) => setTimezone(e.target.value)}>

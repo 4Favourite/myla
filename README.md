@@ -67,6 +67,14 @@ Setup, all in the Supabase dashboard (nothing secret goes in the repo):
 2. Create an Edge Function named exactly `chat` and paste in the code from `supabase/functions/chat/index.ts`.
 3. Turn off the function's JWT verification setting. The code verifies the signed-in user itself.
 
+## Free AI limits and fallbacks (6c)
+
+Groq's free plan gives each model its own daily and per-minute allowance (for example `openai/gpt-oss-20b`: 8K tokens per minute and 200K per day). When one is used up, the function tries the next model (`GROQ_FALLBACK_MODELS`, default `openai/gpt-oss-120b,llama-3.1-8b-instant`), and if all are used up it says which limit was hit and how long Groq says to wait. The dashboard shows which model answered last. The instructions put the fixed text first and the changing details last, and the history sent is limited, to use fewer tokens.
+
+## Dashboard layout and your name (6c)
+
+The dashboard has a bottom tab bar: Today, Chat, Reminders, Memory and More (Settings and Recent activity). Settings has "What Myla calls you", stored in `settings.display_name` (migration `0002_display_name.sql`), which Myla and the greeting use.
+
 ## Voice (6a)
 
 The chat has a voice panel: tap the mic, speak, and tap Done (or stay quiet for your chosen time: 2, 3 or 5 seconds, or only when you tap Done). The browser stops listening at short pauses, so the app keeps listening and joins what you said. It shows a live transcript and animations for listening, thinking and speaking. There is an option to read replies aloud with a voice you choose. Tapping the orb while Myla speaks stops her, and talking over her stops her too. Times are shown in 12-hour format, and Settings uses a 12-hour time picker. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
