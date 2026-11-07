@@ -2,7 +2,7 @@
 
 A personal AI assistant for one person: tasks, reminders and daily planning with memory, spoken and typed conversation, and later email, messages and other device access through permission-gated tools.
 
-**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen, past chats list, timezone dropdown) is done; Phase 4b (the Android app, using Capacitor) is in progress; scheduled summaries and nudges wait for it.
+**Status:** Phases 1 (database) and 2 (text dashboard) are done and deployed. Phases 3a (chat) and 3b (read-only task tool plus activity log) are done. Phase 3c (task-changing tools, with confirmation for deletes) is done. Phase 4a (reminders saved in the database, with honest delivery status) is done. Phase 5a (memory) is done. Phase 5b (summary on request, settings screen, past chats list, timezone dropdown) is done; Phase 4b (the Android app, using Capacitor) works: reminder alerts were confirmed on the phone. Phase 7a (read-only Gmail, voice inside the app) is in progress.
 
 ## Principles
 
@@ -78,6 +78,22 @@ The dashboard has a bottom tab bar: Today, Chat, Reminders, Memory and More (Set
 ## Voice (6a)
 
 The chat has a voice panel: tap the mic, speak, and tap Done (or stay quiet for your chosen time: 2, 3 or 5 seconds, or only when you tap Done). The browser stops listening at short pauses, so the app keeps listening and joins what you said. It shows a live transcript and animations for listening, thinking and speaking. There is an option to read replies aloud with a voice you choose. Tapping the orb while Myla speaks stops her, and talking over her stops her too. Times are shown in 12-hour format, and Settings uses a 12-hour time picker. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
+
+## Timezone (7b)
+
+All times follow the timezone saved in Settings (for example Africa/Lagos), not the phone's clock. The database stores every task and reminder time as an exact moment (UTC), so alarms fire at the right instant wherever the phone is. The Settings timezone decides how a time you type or say ("5 PM") is read, how "today" is worked out, and how times are displayed. If the device is in a different zone, the dashboard says so and the Reminders list also shows the device-clock equivalent. The browser's own zone is used only when no timezone has been saved in Settings. The conversion handles daylight saving.
+
+## Email (7a)
+
+Read-only Gmail (`gmail.readonly`): Myla can look at the inbox but cannot send, change or delete anything. The `check_email` tool (tier 2, logged) returns the real unread counts and a limited list (sender, subject, a short snippet), ranked so messages that ask a question or mention a deadline come first. Email text is treated as untrusted data: after Myla reads email in a request, any change she proposes (a task, a reminder, a memory) is held for your confirmation. The Email tab runs the same logged check without any AI, and records what you dismiss or act on in `attention_signals` (used later to learn what matters to you).
+
+Setup: create a Google Cloud project, enable the Gmail API, publish the consent screen (so sign-in does not expire after 7 days), create a Web OAuth client with the redirect `https://developers.google.com/oauthplayground`, get a refresh token in the OAuth Playground using your own credentials, and save `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` and `GMAIL_REFRESH_TOKEN` as Supabase function secrets. Never put them in the repo.
+
+Voice inside the Android app uses `@capgo/capacitor-speech-recognition` (the phone's own recognizer) instead of the browser's, which the app's web view does not have:
+
+```
+npm install @capgo/capacitor-speech-recognition --legacy-peer-deps
+```
 
 ## Phase 4b: the Android app
 

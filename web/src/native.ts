@@ -1,5 +1,6 @@
 import { Capacitor } from '@capacitor/core'
 import { LocalNotifications } from '@capacitor/local-notifications'
+import { SpeechRecognition } from '@capgo/capacitor-speech-recognition'
 import { supabase } from './lib/supabase'
 
 // Everything here only runs inside the Android app. In a normal browser the
@@ -195,5 +196,82 @@ export async function listenForDelivery(onChange: () => void): Promise<() => voi
   return () => {
     void received.remove()
     void tapped.remove()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Voice input inside the Android app. The app's built-in browser engine has no
+// speech recognition, so this uses the phone's own recognizer through a plugin.
+// ---------------------------------------------------------------------------
+
+export async function nativeSpeechReady(): Promise<{ ok: boolean; reason?: string }> {
+  try {
+    const status = await SpeechRecognition.available()
+    if (!status.available) {
+      return { ok: false, reason: 'Speech recognition is not available on this phone.' }
+    }
+    let permission = await SpeechRecognition.checkPermissions()
+    if (permission.speechRecognition !== 'granted') {
+      permission = await SpeechRecognition.requestPermissions()
+    }
+    if (permission.speechRecognition !== 'granted') {
+      return { ok: false, reason: 'The microphone is not allowed. Allow it for Myla in the phone settings (Apps, Myla, Permissions).' }
+    }
+    return { ok: true }
+  } catch (caught) {
+    return { ok: false, reason: caught instanceof Error ? caught.message : 'Could not start speech recognition.' }
+  }
+}
+
+// Listens for one stretch of speech (the phone ends it at a short pause).
+// onPartial gets the live text, onEnded gets the last text heard.
+export async function startNativeSegment(
+  handlers: {
+    onPartial: (text: string) => void
+    onEnded: (lastText: string) => void
+    onError: (message: string) => void
+  },
+  language: string,
+): Promise<void> {
+  let last = ''
+  let finished = false
+  const handles: { remove: () => Promise<void> }[] = []
+  const cleanup = () => {
+    for (const handle of handles) void handle.remove()
+  }
+  handles.push(
+    await SpeechRecognition.addListener('partialResults', (event) => {
+      const text = event.matches?.[0] ?? ''
+      if (text) {
+        last = text
+        handlers.onPartial(text)
+      }
+    }),
+  )
+  handles.push(
+    await SpeechRecognition.addListener('listeningState', (event) => {
+      if (event.status === 'stopped' && !finished) {
+        finished = true
+        cleanup()
+        handlers.onEnded(last)
+      }
+    }),
+  )
+  try {
+    await SpeechRecognition.start({ language, maxResults: 1, partialResults: true, popup: false })
+  } catch (caught) {
+    if (!finished) {
+      finished = true
+      cleanup()
+      handlers.onError(caught instanceof Error ? caught.message : 'Could not start listening.')
+    }
+  }
+}
+
+export async function stopNativeListening(): Promise<void> {
+  try {
+    await SpeechRecognition.stop()
+  } catch {
+    // already stopped
   }
 }

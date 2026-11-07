@@ -5,22 +5,106 @@ import { configError, supabase } from './lib/supabase'
 import {
   isNative,
   listenForDelivery,
+  nativeSpeechReady,
   openExactAlarmSettings,
   requestNotifications,
   scheduleTest,
+  startNativeSegment,
+  stopNativeListening,
   syncPhone,
 } from './native'
 import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '6c'
+const WEB_VERSION = '7b'
 
-type Tab = 'today' | 'chat' | 'reminders' | 'memory' | 'more'
+// Times in the app follow the timezone chosen in Settings, not the phone's clock.
+let appZone = ''
+const deviceZone = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+})()
+
+function isValidZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function setAppZone(zone: string) {
+  appZone = zone && isValidZone(zone) ? zone : ''
+}
+
+function activeZone(): string {
+  return appZone || deviceZone
+}
+
+function tzOpt(): { timeZone: string } {
+  return { timeZone: activeZone() }
+}
+
+// How far ahead of UTC a timezone is at a moment, in minutes.
+function zoneOffsetMinutes(ms: number, zone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(ms))
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value)
+  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
+  return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000)
+}
+
+// The real (UTC) moment when a wall clock in the zone reads y-m-d hh:mm.
+function zonedTimeToUtc(y: number, m: number, d: number, hh: number, mm: number, zone: string): number {
+  const guess = Date.UTC(y, m - 1, d, hh, mm)
+  let utc = guess - zoneOffsetMinutes(guess, zone) * 60000
+  utc = guess - zoneOffsetMinutes(utc, zone) * 60000
+  return utc
+}
+
+function zoneYmd(ms: number, zone: string): { y: number; m: number; d: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(ms))
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value)
+  return { y: get('year'), m: get('month'), d: get('day') }
+}
+
+// The same moment, shown on this device's own clock.
+function formatDevice(iso: string): string {
+  return new Intl.DateTimeFormat([], {
+    timeZone: deviceZone,
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(new Date(iso))
+}
+
+type Tab = 'today' | 'chat' | 'email' | 'reminders' | 'memory' | 'more'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'today', label: 'Today' },
   { id: 'chat', label: 'Chat' },
+  { id: 'email', label: 'Email' },
   { id: 'reminders', label: 'Reminders' },
   { id: 'memory', label: 'Memory' },
   { id: 'more', label: 'More' },
@@ -50,6 +134,14 @@ function TabIcon({ tab }: { tab: Tab }) {
     return (
       <svg {...common}>
         <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />
+      </svg>
+    )
+  }
+  if (tab === 'email') {
+    return (
+      <svg {...common}>
+        <rect x="3" y="5" width="18" height="14" rx="2" />
+        <path d="M3 7l9 6 9-6" />
       </svg>
     )
   }
@@ -89,14 +181,16 @@ type Task = {
 }
 
 function greeting(): string {
-  const hour = new Date().getHours()
+  const hour = Number(
+    new Intl.DateTimeFormat('en-US', { ...tzOpt(), hour: 'numeric', hourCycle: 'h23' }).format(new Date()),
+  )
   if (hour < 12) return 'Good morning'
   if (hour < 18) return 'Good afternoon'
   return 'Good evening'
 }
 
 function formatDue(iso: string): string {
-  return new Date(iso).toLocaleString([], {
+  return new Date(iso).toLocaleString([], { ...tzOpt(),
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -211,11 +305,14 @@ function Dashboard({ email }: { email: string }) {
   const [activityVersion, setActivityVersion] = useState(0)
   const [tab, setTab] = useState<Tab>('today')
   const [displayName, setDisplayName] = useState('')
+  const [zoneTick, setZoneTick] = useState(0)
 
   // What you asked Myla to call you (a setting).
   const loadName = useCallback(async () => {
-    const { data } = await supabase.from('settings').select('display_name').maybeSingle()
+    const { data } = await supabase.from('settings').select('display_name, timezone').maybeSingle()
     setDisplayName(typeof data?.display_name === 'string' ? data.display_name : '')
+    setAppZone(typeof data?.timezone === 'string' ? data.timezone : '')
+    setZoneTick((t) => t + 1)
   }, [])
 
   useEffect(() => {
@@ -253,13 +350,16 @@ function Dashboard({ email }: { email: string }) {
     // break saving and leave the button stuck on "Saving...".
     let dueAt: string | null = null
     if (newDue) {
-      const parsed = new Date(newDue)
-      const year = parsed.getFullYear()
-      if (Number.isNaN(parsed.getTime()) || year < 2000 || year > 2100) {
+      const [datePart, timePart] = newDue.split('T')
+      const [y, m, d] = (datePart ?? '').split('-').map(Number)
+      const [hh, mm] = (timePart ?? '').split(':').map(Number)
+      const valid = [y, m, d, hh, mm].every((n) => Number.isFinite(n)) && y >= 2000 && y <= 2100
+      if (!valid) {
         setError('That due date does not look right. Check that the year has four digits, or clear the date.')
         return
       }
-      dueAt = parsed.toISOString()
+      // The time you type is in the Settings timezone, whatever this device's clock says.
+      dueAt = new Date(zonedTimeToUtc(y, m, d, hh, mm, activeZone())).toISOString()
     }
 
     setSaving(true)
@@ -315,9 +415,10 @@ function Dashboard({ email }: { email: string }) {
   }
 
   const groups = useMemo(() => {
-    const now = new Date()
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const startOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const zone = activeZone()
+    const { y, m, d } = zoneYmd(Date.now(), zone)
+    const startOfToday = new Date(zonedTimeToUtc(y, m, d, 0, 0, zone))
+    const startOfTomorrow = new Date(zonedTimeToUtc(y, m, d + 1, 0, 0, zone))
     const open = tasks.filter((t) => t.status === 'open')
     const byDue = (a: Task, b: Task) => dueTime(a) - dueTime(b)
     return {
@@ -334,9 +435,9 @@ function Dashboard({ email }: { email: string }) {
         .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''))
         .slice(0, 10),
     }
-  }, [tasks])
+  }, [tasks, zoneTick])
 
-  const todayLabel = new Date().toLocaleDateString([], {
+  const todayLabel = new Date().toLocaleDateString([], { ...tzOpt(),
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -353,6 +454,11 @@ function Dashboard({ email }: { email: string }) {
             {greeting()}
             {displayName ? `, ${displayName}` : ''}
           </h1>
+          {deviceZone !== activeZone() && (
+            <p className="hero-note">
+              Times follow your Settings timezone ({activeZone()}). This device is set to {deviceZone}.
+            </p>
+          )}
         </div>
         <div className="head-actions">
           <span className="muted small">{email}</span>
@@ -399,6 +505,7 @@ function Dashboard({ email }: { email: string }) {
             value={newDue}
             onChange={(e) => setNewDue(e.target.value)}
           />
+          <p className="muted small">Due times are in {activeZone()} time.</p>
           <button className="btn" type="submit" disabled={saving || !newTitle.trim()}>
             {saving ? 'Saving…' : 'Add'}
           </button>
@@ -424,7 +531,7 @@ function Dashboard({ email }: { email: string }) {
 
         <p className="muted small updated">
           {loadedAt
-            ? `Last loaded ${loadedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}. `
+            ? `Last loaded ${loadedAt.toLocaleTimeString([], { ...tzOpt(), hour: 'numeric', minute: '2-digit', hour12: true })}. `
             : ''}
           <button className="link" onClick={() => void load()}>
             Refresh
@@ -439,6 +546,10 @@ function Dashboard({ email }: { email: string }) {
             void load()
           }}
         />
+      </div>
+
+      <div hidden={tab !== 'email'}>
+        <Email onTaskAdded={() => void load()} />
       </div>
 
       <div hidden={tab !== 'reminders'}>
@@ -539,6 +650,7 @@ type VoiceSession = {
   failed: boolean
   timer: number | null
   recognition: RecognitionLike | null
+  nativeActive: boolean
 }
 
 type SpeechResultLike = { isFinal: boolean; 0: { transcript: string } }
@@ -629,6 +741,7 @@ function localClientTime() {
     local_date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
     local_time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
     utc_offset_minutes: now.getTimezoneOffset(),
+    time_zone: deviceZone,
   }
 }
 
@@ -661,7 +774,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [showChats, setShowChats] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const voiceRef = useRef<VoiceSession | null>(null)
-  const voiceSupported = getRecognitionCtor() !== null
+  const voiceSupported = isNative || getRecognitionCtor() !== null
   const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
   const [listening, setListening] = useState(false)
   const [heard, setHeard] = useState('')
@@ -807,6 +920,10 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     voiceRef.current = null
     setListening(false)
     setHeard('')
+    if (session.interim) {
+      session.text = `${session.text} ${session.interim}`.trim()
+      session.interim = ''
+    }
     const said = session.text.trim()
     if (session.cancelled || session.failed) return
     if (said) void sendText(said, 'voice')
@@ -818,8 +935,17 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     const session = voiceRef.current
     if (!session) return
     session.done = true
-    if (session.recognition) session.recognition.stop()
-    else finishListening()
+    if (session.recognition) {
+      session.recognition.stop()
+    } else if (session.nativeActive) {
+      void stopNativeListening()
+      // Safety net in case the phone never reports that it stopped.
+      window.setTimeout(() => {
+        if (voiceRef.current === session) finishListening()
+      }, 1500)
+    } else {
+      finishListening()
+    }
   }
 
   function cancelListening() {
@@ -827,6 +953,39 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     if (!session) return
     session.cancelled = true
     stopListening()
+  }
+
+  // Inside the Android app: the phone's own recognizer, one stretch at a time.
+  function runNativeRecognition(session: VoiceSession) {
+    session.nativeActive = true
+    void startNativeSegment(
+      {
+        onPartial: (text) => {
+          session.interim = text
+          setHeard(`${session.text} ${text}`.trim())
+          armSilenceTimer(session, pauseMs)
+        },
+        onEnded: (lastText) => {
+          session.nativeActive = false
+          if (lastText) session.text = `${session.text} ${lastText}`.trim()
+          session.interim = ''
+          const tooLong = Date.now() - session.startedAt > 120000
+          if (!session.done && !tooLong) {
+            runNativeRecognition(session) // the phone stopped at a short pause: keep listening
+            return
+          }
+          finishListening()
+        },
+        onError: (message) => {
+          session.nativeActive = false
+          session.failed = true
+          session.done = true
+          setError(message)
+          finishListening()
+        },
+      },
+      navigator.language || 'en-US',
+    )
   }
 
   function runRecognition(session: VoiceSession) {
@@ -882,7 +1041,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       stopListening()
       return
     }
-    if (!getRecognitionCtor() || sending) return
+    if ((!isNative && !getRecognitionCtor()) || sending) return
     stopSpeaking() // talking over Myla interrupts her
     const session: VoiceSession = {
       text: '',
@@ -893,6 +1052,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       failed: false,
       timer: null,
       recognition: null,
+      nativeActive: false,
     }
     voiceRef.current = session
     setError(null)
@@ -900,6 +1060,20 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     setListening(true)
     // Allow a little longer before the first words.
     armSilenceTimer(session, pauseMs > 0 ? Math.max(pauseMs, 6000) : 0)
+    if (isNative) {
+      void (async () => {
+        const ready = await nativeSpeechReady()
+        if (!ready.ok) {
+          session.failed = true
+          session.done = true
+          setError(ready.reason ?? 'Voice is not available.')
+          finishListening()
+          return
+        }
+        if (!session.done) runNativeRecognition(session)
+      })()
+      return
+    }
     runRecognition(session)
   }
 
@@ -1116,7 +1290,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
                   >
                     <span className="title">{c.title || 'Untitled chat'}</span>
                     <span className="due">
-                      {new Date(c.created_at).toLocaleString([], {
+                      {new Date(c.created_at).toLocaleString([], { ...tzOpt(),
                         month: 'short',
                         day: 'numeric',
                         hour: 'numeric',
@@ -1252,8 +1426,8 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         </div>
         <p className="muted small">
           {voiceSupported
-            ? 'Voice input usually sends your audio to your browser maker’s speech service. Voices vary by device.'
-            : 'Voice input is not available in this browser or app yet.'}
+            ? 'Voice input uses your phone or browser’s own speech service, which may send your audio to its maker. Voices vary by device.'
+            : 'Voice input is not available here.'}
         </p>
       </div>
       <p className="muted small">
@@ -1321,7 +1495,7 @@ function Activity({ version }: { version: number }) {
                   {r.tool_name} · tier {r.tier} · {r.status}
                 </span>
                 <span className="due">
-                  {new Date(r.created_at).toLocaleString([], {
+                  {new Date(r.created_at).toLocaleString([], { ...tzOpt(),
                     month: 'short',
                     day: 'numeric',
                     hour: 'numeric',
@@ -1417,6 +1591,7 @@ function Reminders({ version }: { version: number }) {
                 <span className="title">{item.title}</span>
                 <span className={passed ? 'due overdue' : 'due'}>
                   {formatDue(item.remind_at)}
+                  {deviceZone !== activeZone() ? ` (${formatDevice(item.remind_at)} on this device)` : ''}
                   {passed ? ' · time passed, delivery not confirmed' : ''}
                 </span>
               </div>
@@ -1760,7 +1935,7 @@ function Settings({ onSaved }: { onSaved: () => void }) {
           />
         </label>
         <label>
-          Timezone
+          Timezone (tasks, reminders and times follow this)
           <select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
             {zoneOptions.map((zone) => (
               <option key={zone} value={zone}>
@@ -1897,7 +2072,7 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
             </span>
             <span>Alerts scheduled on this phone: {status.scheduledHere}</span>
             <span>
-              Last synced: {status.syncedAt ? status.syncedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }) : 'not yet'}
+              Last synced: {status.syncedAt ? status.syncedAt.toLocaleTimeString([], { ...tzOpt(), hour: 'numeric', minute: '2-digit', hour12: true }) : 'not yet'}
             </span>
           </div>
         ) : (
@@ -1942,6 +2117,199 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
           schedule your reminders again.
         </p>
       </div>
+    </section>
+  )
+}
+
+type EmailItem = {
+  id: string
+  from: string
+  subject: string
+  snippet: string
+  date: string
+  category: string
+  asks_question: boolean
+  mentions_deadline: boolean
+}
+
+type EmailCounts = {
+  inbox_unread: number | null
+  promotions_unread: number | null
+  social_unread: number | null
+  updates_unread: number | null
+  forums_unread: number | null
+}
+
+// Read-only look at your Gmail inbox. Nothing is sent, changed or deleted.
+// Checking only happens when you press the button, and every check is logged.
+function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
+  const [scope, setScope] = useState<'attention' | 'all_unread'>('attention')
+  const [items, setItems] = useState<EmailItem[]>([])
+  const [counts, setCounts] = useState<EmailCounts | null>(null)
+  const [checkedAt, setCheckedAt] = useState<Date | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
+
+  async function check(nextScope: 'attention' | 'all_unread') {
+    setLoading(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('chat', {
+        body: { action: 'email_feed', scope: nextScope, client: localClientTime() },
+      })
+      if (invokeError) {
+        setError(await describeFunctionError(invokeError))
+        return
+      }
+      const result = data as { items?: EmailItem[]; counts?: EmailCounts; checked_at?: string } | null
+      if (!result?.items) {
+        setError('No email information came back.')
+        return
+      }
+      const { data: rows } = await supabase
+        .from('attention_signals')
+        .select('item_ref')
+        .eq('source', 'gmail')
+        .eq('action', 'dismissed')
+        .limit(1000)
+      setDismissed(new Set((rows ?? []).map((r) => String(r.item_ref))))
+      setItems(result.items)
+      setCounts(result.counts ?? null)
+      setCheckedAt(result.checked_at ? new Date(result.checked_at) : new Date())
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Something went wrong.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // What you do with a message is remembered, so Myla can learn what matters to you.
+  async function recordSignal(item: EmailItem, action: 'acted' | 'dismissed'): Promise<boolean> {
+    const { error: signalError } = await supabase.from('attention_signals').insert({
+      source: 'gmail',
+      item_ref: item.id,
+      action,
+      details: {
+        from: item.from,
+        category: item.category,
+        asks_question: item.asks_question,
+        mentions_deadline: item.mentions_deadline,
+      },
+    })
+    return !signalError
+  }
+
+  async function dismiss(item: EmailItem) {
+    if (await recordSignal(item, 'dismissed')) {
+      setDismissed((previous) => new Set(previous).add(item.id))
+    } else {
+      setError('Could not record that. Nothing changed.')
+    }
+  }
+
+  async function makeTask(item: EmailItem) {
+    const { error: taskError } = await supabase.from('tasks').insert({ title: `Reply: ${item.subject}`.slice(0, 200) })
+    if (taskError) {
+      setError(`Could not add the task: ${taskError.message}`)
+      return
+    }
+    void recordSignal(item, 'acted')
+    setNotice('Task added. You can see it on the Today tab.')
+    onTaskAdded()
+  }
+
+  const visible = items.filter((i) => !dismissed.has(i.id))
+  const count = (n: number | null | undefined) => (typeof n === 'number' ? String(n) : 'unknown')
+
+  return (
+    <section className="section">
+      <h2>Email</h2>
+      <p className="muted small">
+        Read-only: Myla can look at your inbox but cannot send, change or delete anything. Email text is
+        treated as information, never as instructions.
+      </p>
+
+      <div className="card email-controls">
+        <div className="quick">
+          <button
+            className={scope === 'attention' ? 'btn small' : 'btn ghost small'}
+            onClick={() => setScope('attention')}
+            disabled={loading}
+          >
+            Needs attention
+          </button>
+          <button
+            className={scope === 'all_unread' ? 'btn small' : 'btn ghost small'}
+            onClick={() => setScope('all_unread')}
+            disabled={loading}
+          >
+            All unread
+          </button>
+        </div>
+        <button className="btn" onClick={() => void check(scope)} disabled={loading}>
+          {loading ? 'Checking…' : 'Check email'}
+        </button>
+      </div>
+
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {notice && <p className="muted small">{notice}</p>}
+
+      {counts && (
+        <p className="muted small">
+          Unread in inbox: {count(counts.inbox_unread)} (promotions {count(counts.promotions_unread)}, social{' '}
+          {count(counts.social_unread)}, updates {count(counts.updates_unread)}, forums{' '}
+          {count(counts.forums_unread)}). Showing {visible.length} of the latest
+          {checkedAt
+            ? `, checked ${checkedAt.toLocaleTimeString([], { ...tzOpt(), hour: 'numeric', minute: '2-digit', hour12: true })}`
+            : ''}
+          .
+        </p>
+      )}
+
+      {checkedAt && visible.length === 0 && !error && <p className="muted">Nothing to show here.</p>}
+
+      <ul className="list">
+        {visible.map((item) => (
+          <li key={item.id} className="email-item">
+            <span className="title">{item.subject}</span>
+            <span className="due">
+              {item.from}
+              {item.date ? ` · ${item.date}` : ''}
+            </span>
+            <span className="email-snippet">{item.snippet}</span>
+            {(item.asks_question || item.mentions_deadline) && (
+              <span className="chips">
+                {item.asks_question && <span className="chip">Asks a question</span>}
+                {item.mentions_deadline && <span className="chip chip-warn">Mentions a deadline</span>}
+              </span>
+            )}
+            <span className="email-actions">
+              <a
+                className="btn ghost small"
+                href={`https://mail.google.com/mail/u/0/#inbox/${item.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => void recordSignal(item, 'acted')}
+              >
+                Open in Gmail
+              </a>
+              <button className="btn ghost small" onClick={() => void makeTask(item)}>
+                Make a task
+              </button>
+              <button className="btn ghost small" onClick={() => void dismiss(item)}>
+                Dismiss
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
     </section>
   )
 }

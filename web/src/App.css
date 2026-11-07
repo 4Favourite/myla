@@ -666,7 +666,7 @@ select {
   transform: translateX(-50%);
   width: min(560px, calc(100% - 24px));
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 2px;
   padding: 6px;
   border: 1px solid var(--line);
@@ -700,4 +700,62 @@ select {
   .shell {
     max-width: 720px;
   }
+}
+
+.tab {
+  font-size: 0.66rem;
+}
+
+.email-controls {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.email-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.email-snippet {
+  font-size: 0.9rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.chips,
+.email-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.chip-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+a.btn {
+  text-decoration: none;
+  display: inline-block;
+}
+
+.hero-note {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  opacity: 0.9;
 }
