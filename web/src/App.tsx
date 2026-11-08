@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { configError, supabase } from './lib/supabase'
+import { isValidZone, zonedTimeToUtc, zoneYmd } from './time'
 import {
   isNative,
   listenForDelivery,
   nativeSpeechReady,
   openExactAlarmSettings,
   requestNotifications,
+  scheduleSummaryTest,
   scheduleTest,
   startNativeSegment,
   stopNativeListening,
@@ -17,7 +19,21 @@ import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '7b'
+const WEB_VERSION = '7c'
+
+// Tapping the morning summary alert opens Chat and asks for a fresh summary.
+let summaryRequested = false
+
+function requestSummary() {
+  summaryRequested = true
+  window.dispatchEvent(new Event('myla:summary'))
+}
+
+function takeSummaryRequest(): boolean {
+  const was = summaryRequested
+  summaryRequested = false
+  return was
+}
 
 // Times in the app follow the timezone chosen in Settings, not the phone's clock.
 let appZone = ''
@@ -29,15 +45,6 @@ const deviceZone = (() => {
   }
 })()
 
-function isValidZone(zone: string): boolean {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: zone })
-    return true
-  } catch {
-    return false
-  }
-}
-
 function setAppZone(zone: string) {
   appZone = zone && isValidZone(zone) ? zone : ''
 }
@@ -48,42 +55,6 @@ function activeZone(): string {
 
 function tzOpt(): { timeZone: string } {
   return { timeZone: activeZone() }
-}
-
-// How far ahead of UTC a timezone is at a moment, in minutes.
-function zoneOffsetMinutes(ms: number, zone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: zone,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(new Date(ms))
-  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value)
-  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
-  return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000)
-}
-
-// The real (UTC) moment when a wall clock in the zone reads y-m-d hh:mm.
-function zonedTimeToUtc(y: number, m: number, d: number, hh: number, mm: number, zone: string): number {
-  const guess = Date.UTC(y, m - 1, d, hh, mm)
-  let utc = guess - zoneOffsetMinutes(guess, zone) * 60000
-  utc = guess - zoneOffsetMinutes(utc, zone) * 60000
-  return utc
-}
-
-function zoneYmd(ms: number, zone: string): { y: number; m: number; d: number } {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: zone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date(ms))
-  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value)
-  return { y: get('year'), m: get('month'), d: get('day') }
 }
 
 // The same moment, shown on this device's own clock.
@@ -306,6 +277,14 @@ function Dashboard({ email }: { email: string }) {
   const [tab, setTab] = useState<Tab>('today')
   const [displayName, setDisplayName] = useState('')
   const [zoneTick, setZoneTick] = useState(0)
+
+  // The morning summary alert was tapped: show the Chat tab (Chat then asks for the summary).
+  useEffect(() => {
+    const showChat = () => setTab('chat')
+    if (summaryRequested) showChat()
+    window.addEventListener('myla:summary', showChat)
+    return () => window.removeEventListener('myla:summary', showChat)
+  }, [])
 
   // What you asked Myla to call you (a setting).
   const loadName = useCallback(async () => {
@@ -564,7 +543,12 @@ function Dashboard({ email }: { email: string }) {
       </div>
 
       <div hidden={tab !== 'more'}>
-        <Settings onSaved={() => void loadName()} />
+        <Settings
+          onSaved={() => {
+            void loadName()
+            setActivityVersion((v) => v + 1)
+          }}
+        />
         <Activity version={activityVersion} />
       </div>
 
@@ -773,6 +757,18 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [showChats, setShowChats] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+  const sendTextRef = useRef<(text: string, mode?: 'text' | 'voice') => Promise<void>>(sendText)
+  useEffect(() => {
+    sendTextRef.current = sendText
+  })
+  useEffect(() => {
+    const ask = () => {
+      if (takeSummaryRequest()) void sendTextRef.current('Give me my morning summary.')
+    }
+    ask()
+    window.addEventListener('myla:summary', ask)
+    return () => window.removeEventListener('myla:summary', ask)
+  }, [])
   const voiceRef = useRef<VoiceSession | null>(null)
   const voiceSupported = isNative || getRecognitionCtor() !== null
   const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
@@ -1921,8 +1917,9 @@ function Settings({ onSaved }: { onSaved: () => void }) {
     <section className="section">
       <h2>Settings</h2>
       <p className="muted small">
-        Saved for later. Nothing uses these yet: they apply once your phone delivers reminders and
-        summaries.
+        The morning summary time and switch are used by the Android app: it shows a daily alert, and
+        tapping it asks Myla for your summary. Quiet hours and the nudge limit are saved for later and
+        do nothing yet.
       </p>
       <form className="card settings" onSubmit={save}>
         <label>
@@ -2031,7 +2028,7 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
   useEffect(() => {
     let stop: (() => void) | null = null
     let cancelled = false
-    void listenForDelivery(() => onChangeRef.current()).then((fn) => {
+    void listenForDelivery(() => onChangeRef.current(), requestSummary).then((fn) => {
       if (cancelled) fn()
       else stop = fn
     })
@@ -2071,6 +2068,7 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
               {status.exactAlarms === 'denied' ? ' (alerts may be late)' : ''}
             </span>
             <span>Alerts scheduled on this phone: {status.scheduledHere}</span>
+            <span>Morning summary: {status.summary || 'not checked yet'}</span>
             <span>
               Last synced: {status.syncedAt ? status.syncedAt.toLocaleTimeString([], { ...tzOpt(), hour: 'numeric', minute: '2-digit', hour12: true }) : 'not yet'}
             </span>
@@ -2109,6 +2107,15 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
             onClick={() => void act(scheduleTest, 'Test alert set for one minute from now. Minimise Myla and wait.')}
           >
             Test alert in 1 minute
+          </button>
+          <button
+            className="btn ghost small"
+            disabled={busy || status?.notifications !== 'granted'}
+            onClick={() =>
+              void act(scheduleSummaryTest, 'Summary test set for one minute from now. Minimise Myla, wait, then tap the alert.')
+            }
+          >
+            Test summary alert
           </button>
         </div>
         <p className="muted small">

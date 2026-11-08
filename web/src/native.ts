@@ -10,6 +10,13 @@ export const isNative = Capacitor.isNativePlatform()
 const DEVICE_KEY = 'myla.deviceId'
 const CHANNEL_ID = 'reminders'
 const TEST_ID = 2147483000
+const SUMMARY_TEST_ID = 2147483001
+const SUMMARY_BASE_ID = 2147000000 // 7 ids from here are the daily morning summary alerts
+const SUMMARY_DAYS = 7
+
+function isReserved(id: number): boolean {
+  return id === TEST_ID || id === SUMMARY_TEST_ID || (id >= SUMMARY_BASE_ID && id < SUMMARY_BASE_ID + SUMMARY_DAYS)
+}
 
 export type PhoneStatus = {
   notifications: 'granted' | 'denied' | 'not asked'
@@ -18,6 +25,7 @@ export type PhoneStatus = {
   confirmed: number
   syncedAt: Date | null
   problem: string | null
+  summary: string
 }
 
 // Android needs whole-number notification ids, so each reminder gets a stable one.
@@ -26,7 +34,7 @@ export function notificationId(uuid: string): number {
   for (let i = 0; i < uuid.length; i++) {
     hash = (hash * 31 + uuid.charCodeAt(i)) | 0
   }
-  return hash === 0 || hash === TEST_ID ? 1 : hash
+  return hash === 0 || isReserved(hash) ? 1 : hash
 }
 
 async function readPermissions(): Promise<Pick<PhoneStatus, 'notifications' | 'exactAlarms'>> {
@@ -114,7 +122,7 @@ async function confirmDelivered(deviceId: string): Promise<number> {
 // really scheduled (read back from the phone, not assumed).
 export async function syncPhone(): Promise<PhoneStatus> {
   const permissions = await readPermissions()
-  const status: PhoneStatus = { ...permissions, scheduledHere: 0, confirmed: 0, syncedAt: null, problem: null }
+  const status: PhoneStatus = { ...permissions, scheduledHere: 0, confirmed: 0, syncedAt: null, problem: null, summary: '' }
   if (permissions.notifications !== 'granted') return status
 
   await ensureChannel()
@@ -138,7 +146,7 @@ export async function syncPhone(): Promise<PhoneStatus> {
   const pending = (await LocalNotifications.getPending()).notifications
   const pendingIds = new Set(pending.map((n) => n.id))
 
-  const stale = pending.filter((n) => n.id !== TEST_ID && !wanted.has(n.id))
+  const stale = pending.filter((n) => !isReserved(n.id) && !wanted.has(n.id))
   if (stale.length > 0) {
     await LocalNotifications.cancel({ notifications: stale.map((n) => ({ id: n.id })) })
   }
@@ -162,8 +170,131 @@ export async function syncPhone(): Promise<PhoneStatus> {
   if (status.scheduledHere < rows.length) {
     status.problem = `Only ${status.scheduledHere} of ${rows.length} reminders could be scheduled on this phone.`
   }
+  try {
+    status.summary = await syncMorningSummary()
+  } catch (caught) {
+    status.summary = `Could not schedule: ${caught instanceof Error ? caught.message : 'unknown error'}`
+  }
   status.syncedAt = new Date()
   return status
+}
+
+// ---------------------------------------------------------------------------
+// The daily morning summary alert. It only says the summary is ready; tapping it
+// opens Myla and asks for a fresh summary, so it never shows out-of-date numbers.
+// ---------------------------------------------------------------------------
+
+function validZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function zoneOffsetMinutes(ms: number, zone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(ms))
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value)
+  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
+  return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000)
+}
+
+function zonedTimeToUtc(y: number, m: number, d: number, hh: number, mm: number, zone: string): number {
+  const guess = Date.UTC(y, m - 1, d, hh, mm)
+  let utc = guess - zoneOffsetMinutes(guess, zone) * 60000
+  utc = guess - zoneOffsetMinutes(utc, zone) * 60000
+  return utc
+}
+
+function zoneYmd(ms: number, zone: string): { y: number; m: number; d: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(ms))
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value)
+  return { y: get('year'), m: get('month'), d: get('day') }
+}
+
+function twelveHour(hh: number, mm: number): string {
+  return `${hh % 12 === 0 ? 12 : hh % 12}:${String(mm).padStart(2, '0')} ${hh < 12 ? 'AM' : 'PM'}`
+}
+
+// Makes the phone's morning summary alerts match Settings (time, timezone, switch).
+// Returns a plain sentence describing exactly what is scheduled.
+export async function syncMorningSummary(): Promise<string> {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('timezone, display_name, morning_summary_time, switches')
+    .maybeSingle()
+  if (error) throw new Error(`Could not read Settings: ${error.message}`)
+
+  const pending = (await LocalNotifications.getPending()).notifications
+  const old = pending.filter((n) => n.id >= SUMMARY_BASE_ID && n.id < SUMMARY_BASE_ID + SUMMARY_DAYS)
+  if (old.length > 0) await LocalNotifications.cancel({ notifications: old.map((n) => ({ id: n.id })) })
+
+  const time = typeof data?.morning_summary_time === 'string' ? data.morning_summary_time : ''
+  const switches = (data?.switches ?? {}) as Record<string, unknown>
+  if (!time) return 'Off: set a morning summary time in Settings.'
+  if (switches.morning_summary === false) return 'Off: the Morning summary switch in Settings is off.'
+
+  const zone =
+    typeof data?.timezone === 'string' && validZone(data.timezone)
+      ? data.timezone
+      : Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  const [hh, mm] = time.split(':').map(Number)
+  const name = typeof data?.display_name === 'string' ? data.display_name.trim() : ''
+
+  const now = Date.now()
+  const today = zoneYmd(now, zone)
+  const notifications = []
+  for (let i = 0; i < SUMMARY_DAYS + 1 && notifications.length < SUMMARY_DAYS; i++) {
+    const at = zonedTimeToUtc(today.y, today.m, today.d + i, hh, mm, zone)
+    if (at > now + 15000) {
+      notifications.push({
+        id: SUMMARY_BASE_ID + notifications.length,
+        title: name ? `Good morning, ${name}` : 'Good morning',
+        body: 'Your morning summary is ready. Tap to see your day.',
+        channelId: CHANNEL_ID,
+        extra: { type: 'summary' },
+        schedule: { at: new Date(at), allowWhileIdle: true },
+      })
+    }
+  }
+  await LocalNotifications.schedule({ notifications })
+
+  const after = (await LocalNotifications.getPending()).notifications.filter(
+    (n) => n.id >= SUMMARY_BASE_ID && n.id < SUMMARY_BASE_ID + SUMMARY_DAYS,
+  )
+  if (after.length === 0) throw new Error('The phone did not accept the alerts.')
+  return `Every day at ${twelveHour(hh, mm)} (${zone}), scheduled for the next ${after.length} days.`
+}
+
+export async function scheduleSummaryTest(): Promise<void> {
+  await ensureChannel()
+  await LocalNotifications.schedule({
+    notifications: [
+      {
+        id: SUMMARY_TEST_ID,
+        title: 'Good morning',
+        body: 'Your morning summary is ready. Tap to see your day.',
+        channelId: CHANNEL_ID,
+        extra: { type: 'summary' },
+        schedule: { at: new Date(Date.now() + 60000), allowWhileIdle: true },
+      },
+    ],
+  })
 }
 
 export async function scheduleTest(): Promise<void> {
@@ -182,8 +313,9 @@ export async function scheduleTest(): Promise<void> {
 }
 
 // Notices when a reminder arrives or is tapped while the app is open or reopened.
-export async function listenForDelivery(onChange: () => void): Promise<() => void> {
+export async function listenForDelivery(onChange: () => void, onSummaryTap: () => void): Promise<() => void> {
   const handle = async (extra: unknown) => {
+    if ((extra as { type?: unknown } | undefined)?.type === 'summary') return
     const id = (extra as { reminderId?: unknown } | undefined)?.reminderId
     if (typeof id === 'string' && (await markDelivered(id, localStorage.getItem(DEVICE_KEY)))) onChange()
   }
@@ -191,6 +323,10 @@ export async function listenForDelivery(onChange: () => void): Promise<() => voi
     void handle(n.extra)
   })
   const tapped = await LocalNotifications.addListener('localNotificationActionPerformed', (event) => {
+    if ((event.notification.extra as { type?: unknown } | undefined)?.type === 'summary') {
+      onSummaryTap()
+      return
+    }
     void handle(event.notification.extra)
   })
   return () => {
