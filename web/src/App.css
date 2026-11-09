@@ -759,3 +759,313 @@ a.btn {
   font-size: 0.8rem;
   opacity: 0.9;
 }
+
+/* ---- Floating mic button ---- */
+.fab {
+  position: fixed;
+  right: 16px;
+  bottom: 96px;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  box-shadow: 0 8px 24px rgba(139, 92, 246, 0.5);
+  cursor: pointer;
+  z-index: 9;
+  transition: transform 0.15s ease;
+}
+
+.fab:hover {
+  transform: scale(1.06);
+}
+
+/* ---- Voice mode screen ---- */
+.voice-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  overflow-y: auto;
+  color: #fff;
+  background: radial-gradient(1200px 800px at 50% 28%, #2b1c63 0%, #0d1126 58%, #06080f 100%);
+}
+
+.vs-top {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.vs-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.vs-status {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.vs-close {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.vs-orb {
+  width: min(76vw, 330px);
+  aspect-ratio: 1;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  flex: none;
+}
+
+.orbstage {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.orbstage .glow {
+  opacity: 0.45;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.orbstage .ring {
+  fill: none;
+  stroke: #a78bfa;
+  stroke-width: 1.6;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.orbstage .rb {
+  stroke: #c4b5fd;
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.25;
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  transform: scaleY(0.35);
+}
+
+.orbstage .bars {
+  transform-box: view-box;
+  transform-origin: 150px 150px;
+}
+
+.phase-listening .orbstage .rb {
+  stroke: #fda4af;
+  opacity: 0.7;
+  animation: rbWave 2.2s ease-in-out infinite;
+}
+
+.phase-listening .orbstage .ring {
+  stroke: #fda4af;
+  animation: ringPulse 2.4s ease-out infinite;
+}
+
+.phase-speaking .orbstage .rb {
+  stroke: #86efac;
+  opacity: 0.95;
+  animation: rbWave 0.95s ease-in-out infinite;
+}
+
+.phase-speaking .orbstage .ring {
+  stroke: #86efac;
+  animation: ringPulse 1.5s ease-out infinite;
+}
+
+.phase-thinking .orbstage .rb {
+  stroke: #93c5fd;
+  opacity: 0.6;
+}
+
+.phase-thinking .orbstage .bars {
+  animation: spin 3.2s linear infinite;
+}
+
+.phase-listening .orbstage .glow,
+.phase-speaking .orbstage .glow {
+  animation: glowBreathe 1.8s ease-in-out infinite;
+}
+
+.orbstage .r2 { animation-delay: 0.8s; }
+.orbstage .r3 { animation-delay: 1.6s; }
+
+.vs-caption {
+  width: 100%;
+  max-width: 560px;
+  min-height: 3.2em;
+  margin: 0;
+  text-align: center;
+  font-size: 1.1rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.92);
+  overflow-wrap: anywhere;
+}
+
+.vs-error {
+  max-width: 560px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid #fca5a5;
+  border-radius: 12px;
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.14);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.vs-chips,
+.vs-confirm {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.vs-confirm-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  font-weight: 600;
+}
+
+.vs-confirm-item span {
+  flex: 1 1 100%;
+  text-align: center;
+}
+
+.vs-chip {
+  padding: 9px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.9rem;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+
+.vs-chip:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.vs-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.vs-controls {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.vs-btn {
+  padding: 10px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 14px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+
+.vs-end {
+  background: #dc2626;
+  border-color: #dc2626;
+}
+
+.vs-transcript {
+  width: 100%;
+  max-width: 560px;
+  max-height: 34vh;
+  overflow-y: auto;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.vs-line {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  color: rgba(255, 255, 255, 0.85);
+  overflow-wrap: anywhere;
+}
+
+.vs-line.user {
+  color: #c4b5fd;
+}
+
+.vs-line.user::before {
+  content: 'You: ';
+  font-weight: 650;
+}
+
+.vs-line.assistant::before {
+  content: 'Myla: ';
+  font-weight: 650;
+}
+
+@keyframes rbWave {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1.7); }
+}
+
+@keyframes ringPulse {
+  0% { transform: scale(0.85); opacity: 0.55; }
+  100% { transform: scale(1.45); opacity: 0; }
+}
+
+@keyframes glowBreathe {
+  0%, 100% { transform: scale(0.94); opacity: 0.4; }
+  50% { transform: scale(1.06); opacity: 0.75; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbstage .rb,
+  .orbstage .ring,
+  .orbstage .glow,
+  .orbstage .bars {
+    animation: none !important;
+  }
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
+import { createPortal } from 'react-dom'
 import { configError, supabase } from './lib/supabase'
 import { isValidZone, zonedTimeToUtc, zoneYmd } from './time'
 import {
@@ -19,7 +20,7 @@ import type { PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '7c'
+const WEB_VERSION = '8a'
 
 // Tapping the morning summary alert opens Chat and asks for a fresh summary.
 let summaryRequested = false
@@ -552,6 +553,14 @@ function Dashboard({ email }: { email: string }) {
         <Activity version={activityVersion} />
       </div>
 
+      <button
+        className="fab"
+        onClick={() => window.dispatchEvent(new Event('myla:voice-open'))}
+        aria-label="Talk to Myla"
+      >
+        <MylaMark size={54} />
+      </button>
+
       <nav className="tabbar" aria-label="Main">
         {TABS.map((t) => (
           <button
@@ -622,6 +631,87 @@ type Confirmation = {
   id: string
   description: string
 }
+
+// Myla's mark: a glossy gradient orb with a small sound wave inside.
+function MylaMark({ size = 32 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden="true">
+      <defs>
+        <linearGradient id="mm-g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#6366f1" />
+          <stop offset="0.55" stopColor="#a855f7" />
+          <stop offset="1" stopColor="#ec4899" />
+        </linearGradient>
+        <radialGradient id="mm-h" cx="0.3" cy="0.2" r="0.7">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.55" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <circle cx="32" cy="32" r="30" fill="url(#mm-g)" />
+      <circle cx="32" cy="32" r="30" fill="url(#mm-h)" />
+      <g stroke="#ffffff" strokeWidth="5" strokeLinecap="round">
+        <line x1="17" y1="38" x2="17" y2="26" />
+        <line x1="25" y1="44" x2="25" y2="20" />
+        <line x1="32" y1="48" x2="32" y2="16" />
+        <line x1="39" y1="44" x2="39" y2="20" />
+        <line x1="47" y1="38" x2="47" y2="26" />
+      </g>
+    </svg>
+  )
+}
+
+// The big animated orb on the voice screen. Its look changes with what Myla is doing.
+function OrbStage({ phase }: { phase: string }) {
+  const bars = Array.from({ length: 40 }, (_, i) => i)
+  return (
+    <svg className={`orbstage phase-${phase}`} viewBox="0 0 300 300" aria-hidden="true">
+      <defs>
+        <linearGradient id="os-g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#6366f1" />
+          <stop offset="0.55" stopColor="#a855f7" />
+          <stop offset="1" stopColor="#ec4899" />
+        </linearGradient>
+        <radialGradient id="os-h" cx="0.3" cy="0.2" r="0.7">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.55" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0" />
+        </radialGradient>
+        <radialGradient id="os-glow" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stopColor="#a78bfa" stopOpacity="0.55" />
+          <stop offset="1" stopColor="#a78bfa" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <circle className="glow" cx="150" cy="150" r="140" fill="url(#os-glow)" />
+      <circle className="ring r1" cx="150" cy="150" r="84" />
+      <circle className="ring r2" cx="150" cy="150" r="84" />
+      <circle className="ring r3" cx="150" cy="150" r="84" />
+      <g className="bars">
+        {bars.map((i) => (
+          <g key={i} transform={`rotate(${i * 9} 150 150)`}>
+            <line className="rb" style={{ animationDelay: `${(i % 8) * -110}ms` }} x1="150" y1="30" x2="150" y2="52" />
+          </g>
+        ))}
+      </g>
+      <g transform="translate(86 86) scale(2.1)">
+        <circle cx="32" cy="32" r="30" fill="url(#os-g)" />
+        <circle cx="32" cy="32" r="30" fill="url(#os-h)" />
+        <g stroke="#ffffff" strokeWidth="5" strokeLinecap="round">
+          <line x1="17" y1="38" x2="17" y2="26" />
+          <line x1="25" y1="44" x2="25" y2="20" />
+          <line x1="32" y1="48" x2="32" y2="16" />
+          <line x1="39" y1="44" x2="39" y2="20" />
+          <line x1="47" y1="38" x2="47" y2="26" />
+        </g>
+      </g>
+    </svg>
+  )
+}
+
+const DEFAULT_SUGGESTIONS = [
+  'What’s on my list today?',
+  'Summarize my day',
+  'Any important email?',
+  'Remind me in an hour',
+]
 
 // Voice: the browser's own speech recognition and speech voices. Free, but quality
 // varies, and the browser usually sends your audio to its maker's speech service.
@@ -756,6 +846,18 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [answeredBy, setAnsweredBy] = useState<string | null>(null)
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [showChats, setShowChats] = useState(false)
+  const [voiceActive, setVoiceActive] = useState(false)
+  const [voicePaused, setVoicePaused] = useState(false)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [showTranscript, setShowTranscript] = useState(false)
+  const [awaitingSpeech, setAwaitingSpeech] = useState(false)
+  const [soundsOn, setSoundsOn] = useState(() => readSetting('myla.sounds') === '1')
+  const voiceActiveRef = useRef(false)
+  const voicePausedRef = useRef(false)
+  const emptyRoundsRef = useRef(0)
+  const voiceStartRef = useRef(0)
+  const toggleRef = useRef<() => void>(() => {})
+  const openVoiceRef = useRef<() => void>(() => {})
   const listRef = useRef<HTMLDivElement>(null)
   const sendTextRef = useRef<(text: string, mode?: 'text' | 'voice') => Promise<void>>(sendText)
   useEffect(() => {
@@ -885,10 +987,40 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   function stopSpeaking() {
     if (speechSupported) window.speechSynthesis.cancel()
     setSpeaking(false)
+    setAwaitingSpeech(false)
+  }
+
+  // A soft optional chime, made with the browser's audio (no sound files).
+  function playTone(kind: 'listen' | 'ready') {
+    if (!soundsOn) return
+    try {
+      const Ctor =
+        window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!Ctor) return
+      const audio = new Ctor()
+      const notes = kind === 'listen' ? [660, 880] : [520]
+      notes.forEach((frequency, index) => {
+        const oscillator = audio.createOscillator()
+        const gain = audio.createGain()
+        const start = audio.currentTime + index * 0.12
+        oscillator.type = 'sine'
+        oscillator.frequency.value = frequency
+        gain.gain.setValueAtTime(0.0001, start)
+        gain.gain.exponentialRampToValueAtTime(0.08, start + 0.02)
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18)
+        oscillator.connect(gain)
+        gain.connect(audio.destination)
+        oscillator.start(start)
+        oscillator.stop(start + 0.2)
+      })
+      window.setTimeout(() => void audio.close(), 700)
+    } catch {
+      // sound is optional
+    }
   }
 
   function speak(text: string) {
-    if (!speechSupported || !speakReplies) return
+    if (!speechSupported || (!speakReplies && !voiceActiveRef.current)) return
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(text)
     const chosen = voices.find((v) => v.name === voiceName) ?? preferredVoice(voices)
@@ -896,9 +1028,23 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       utterance.voice = chosen
       utterance.lang = chosen.lang
     }
-    utterance.onstart = () => setSpeaking(true)
-    utterance.onend = () => setSpeaking(false)
-    utterance.onerror = () => setSpeaking(false)
+    setAwaitingSpeech(true)
+    const fallback = window.setTimeout(() => setAwaitingSpeech(false), 3000)
+    utterance.onstart = () => {
+      window.clearTimeout(fallback)
+      setAwaitingSpeech(false)
+      setSpeaking(true)
+    }
+    utterance.onend = () => {
+      window.clearTimeout(fallback)
+      setAwaitingSpeech(false)
+      setSpeaking(false)
+    }
+    utterance.onerror = () => {
+      window.clearTimeout(fallback)
+      setAwaitingSpeech(false)
+      setSpeaking(false)
+    }
     window.speechSynthesis.speak(utterance)
   }
 
@@ -921,9 +1067,20 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       session.interim = ''
     }
     const said = session.text.trim()
-    if (session.cancelled || session.failed) return
-    if (said) void sendText(said, 'voice')
-    else setError('I did not hear anything. Tap the mic and try again.')
+    if (session.cancelled) return
+    if (session.failed) {
+      if (voiceActiveRef.current) pauseVoice()
+      return
+    }
+    if (said) {
+      emptyRoundsRef.current = 0
+      void sendText(said, 'voice')
+    } else if (voiceActiveRef.current) {
+      emptyRoundsRef.current += 1
+      if (emptyRoundsRef.current >= 2) pauseVoice()
+    } else {
+      setError('I did not hear anything. Tap the mic and try again.')
+    }
   }
 
   // Done (or a long enough pause) stops listening and sends what was heard.
@@ -1054,6 +1211,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     setError(null)
     setHeard('')
     setListening(true)
+    if (voiceActiveRef.current) playTone('listen')
     // Allow a little longer before the first words.
     armSilenceTimer(session, pauseMs > 0 ? Math.max(pauseMs, 6000) : 0)
     if (isNative) {
@@ -1087,6 +1245,103 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     }
   }, [])
 
+  // ---- Voice mode: a full-screen, hands-free conversation ----
+  function pauseVoice() {
+    voicePausedRef.current = true
+    setVoicePaused(true)
+  }
+
+  function pauseVoiceIfActive() {
+    if (voiceActiveRef.current) pauseVoice()
+  }
+
+  function openVoiceMode() {
+    if (!voiceSupported) {
+      setError('Voice is not available here.')
+      return
+    }
+    voiceActiveRef.current = true
+    voicePausedRef.current = false
+    emptyRoundsRef.current = 0
+    voiceStartRef.current = messages.length
+    setError(null)
+    setVoicePaused(false)
+    setVoiceActive(true)
+  }
+
+  function closeVoiceMode() {
+    voiceActiveRef.current = false
+    cancelListening()
+    stopSpeaking()
+    setVoiceActive(false)
+    setVoicePaused(false)
+  }
+
+  function togglePause() {
+    if (voicePaused) {
+      voicePausedRef.current = false
+      emptyRoundsRef.current = 0
+      setError(null)
+      setVoicePaused(false)
+    } else {
+      pauseVoice()
+      cancelListening()
+      stopSpeaking()
+    }
+  }
+
+  // Tapping the orb: continue if paused, interrupt Myla if she is talking, send now if listening.
+  function orbTap() {
+    if (voicePaused) {
+      togglePause()
+      return
+    }
+    if (speaking || awaitingSpeech) {
+      stopSpeaking()
+      return
+    }
+    if (listening) stopListening()
+  }
+
+  function chooseSuggestion(text: string) {
+    if (sending) return
+    cancelListening()
+    stopSpeaking()
+    voicePausedRef.current = false
+    setVoicePaused(false)
+    void sendText(text, 'text')
+  }
+
+  useEffect(() => {
+    toggleRef.current = toggleListening
+    openVoiceRef.current = openVoiceMode
+  })
+
+  // The loop: when nothing is happening, listen again.
+  useEffect(() => {
+    if (!voiceActive || voicePaused || listening || sending || speaking || awaitingSpeech) return
+    const timer = window.setTimeout(() => {
+      if (voiceActiveRef.current && !voicePausedRef.current && !voiceRef.current) toggleRef.current()
+    }, 600)
+    return () => window.clearTimeout(timer)
+  }, [voiceActive, voicePaused, listening, sending, speaking, awaitingSpeech])
+
+  // The floating mic button elsewhere in the app opens voice mode.
+  useEffect(() => {
+    const open = () => openVoiceRef.current()
+    window.addEventListener('myla:voice-open', open)
+    return () => window.removeEventListener('myla:voice-open', open)
+  }, [])
+
+  useEffect(() => {
+    if (!voiceActive) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [voiceActive])
+
   // Start a fresh conversation. The next message creates a new one.
   function startNew() {
     if (sending) return
@@ -1106,13 +1361,20 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     setDraft('')
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('chat', {
-        body: { message: text, conversation_id: conversationId, client: localClientTime(), input_mode: mode },
+        body: {
+          message: text,
+          conversation_id: conversationId,
+          client: localClientTime(),
+          input_mode: mode,
+          spoken: voiceActiveRef.current,
+        },
       })
       if (invokeError) {
         // Put the message back so nothing is lost, and say what went wrong.
         setMessages((current) => current.filter((m) => m.id !== pendingId))
         setDraft(text)
         setError(await describeFunctionError(invokeError))
+        pauseVoiceIfActive()
         return
       }
       const result = data as {
@@ -1122,14 +1384,18 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         confirmations?: Confirmation[]
         version?: string
         model?: string
+        suggestions?: string[]
       } | null
       if (!result?.reply) {
         setMessages((current) => current.filter((m) => m.id !== pendingId))
         setDraft(text)
         setError('Myla did not send a reply.')
+        pauseVoiceIfActive()
         return
       }
       const replyText = result.reply
+      setSuggestions(Array.isArray(result.suggestions) ? result.suggestions : [])
+      if (voiceActiveRef.current) playTone('ready')
       speak(replyText)
       if (result.version) setFunctionVersion(result.version)
       if (result.model) setAnsweredBy(result.model)
@@ -1148,6 +1414,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       setMessages((current) => current.filter((m) => m.id !== pendingId))
       setDraft(text)
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
+      pauseVoiceIfActive()
     } finally {
       setSending(false)
       void loadChats()
@@ -1195,7 +1462,131 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     }
   }
 
+  const phase = voicePaused
+    ? 'paused'
+    : listening
+      ? 'listening'
+      : sending
+        ? 'thinking'
+        : speaking || awaitingSpeech
+          ? 'speaking'
+          : 'idle'
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+  const caption =
+    phase === 'listening'
+      ? heard || 'Go ahead, I’m listening…'
+      : phase === 'thinking'
+        ? (lastUser?.content ?? '')
+        : phase === 'paused'
+          ? 'Paused. Tap the orb to carry on.'
+          : (lastAssistant?.content ?? 'Say something…')
+  const statusText =
+    phase === 'listening'
+      ? 'Listening'
+      : phase === 'thinking'
+        ? 'Thinking'
+        : phase === 'speaking'
+          ? 'Speaking'
+          : phase === 'paused'
+            ? 'Paused'
+            : 'Ready'
+  const chips = suggestions.length > 0 ? suggestions : DEFAULT_SUGGESTIONS
+  const sessionMessages = messages.slice(voiceStartRef.current)
+
+  const voiceScreen = (
+    <div className={`voice-screen phase-${phase}`} role="dialog" aria-label="Voice conversation with Myla">
+      <div className="vs-top">
+        <div className="vs-title">
+          <MylaMark size={28} />
+          <span>Myla</span>
+        </div>
+        <span className="vs-status">{statusText}</span>
+        <button className="vs-close" onClick={closeVoiceMode} aria-label="End the voice conversation">
+          ✕
+        </button>
+      </div>
+
+      <button
+        className="vs-orb"
+        onClick={orbTap}
+        aria-label={voicePaused ? 'Continue' : speaking ? 'Stop talking' : listening ? 'Send now' : 'Voice orb'}
+      >
+        <OrbStage phase={phase} />
+      </button>
+
+      <p className="vs-caption">{caption}</p>
+
+      {error && (
+        <p className="vs-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {lastAssistant?.confirmations && lastAssistant.confirmations.length > 0 && (
+        <div className="vs-confirm">
+          {lastAssistant.confirmations.map((c) => (
+            <div key={c.id} className="vs-confirm-item">
+              <span>{c.description}?</span>
+              <button className="vs-chip" disabled={sending} onClick={() => void answerConfirmation(lastAssistant.id, c.id, 'approve')}>
+                Confirm
+              </button>
+              <button className="vs-chip" disabled={sending} onClick={() => void answerConfirmation(lastAssistant.id, c.id, 'cancel')}>
+                Cancel
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="vs-chips">
+        {chips.map((chip) => (
+          <button key={chip} className="vs-chip" disabled={sending} onClick={() => chooseSuggestion(chip)}>
+            {chip}
+          </button>
+        ))}
+      </div>
+
+      <div className="vs-controls">
+        <button className="vs-btn" onClick={togglePause}>
+          {voicePaused ? 'Resume' : 'Pause'}
+        </button>
+        <button className="vs-btn" onClick={() => setShowTranscript((v) => !v)}>
+          {showTranscript ? 'Hide transcript' : 'Transcript'}
+        </button>
+        <button
+          className="vs-btn"
+          onClick={() => {
+            const next = !soundsOn
+            setSoundsOn(next)
+            writeSetting('myla.sounds', next ? '1' : '0')
+          }}
+        >
+          Chimes {soundsOn ? 'on' : 'off'}
+        </button>
+        <button className="vs-btn vs-end" onClick={closeVoiceMode}>
+          End
+        </button>
+      </div>
+
+      {showTranscript && (
+        <div className="vs-transcript">
+          {sessionMessages.length === 0 ? (
+            <p className="vs-line">Nothing said yet. Everything you say here is also saved in your chat.</p>
+          ) : (
+            sessionMessages.map((m) => (
+              <p key={m.id} className={`vs-line ${m.role}`}>
+                {m.content}
+              </p>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+
   return (
+    <>
     <section className="section">
       <h2>Talk to Myla</h2>
       <p className="muted small">Myla can read and change your tasks. She asks you before deleting anything.</p>
@@ -1260,6 +1651,9 @@ function Chat({ onActivity }: { onActivity: () => void }) {
             onClick={() => void sendText('Give me my morning summary.')}
           >
             Summarize my day
+          </button>
+          <button type="button" className="btn small" disabled={!voiceSupported} onClick={openVoiceMode}>
+            Voice mode
           </button>
           <button type="button" className="btn ghost small" disabled={sending} onClick={startNew}>
             New chat
@@ -1431,6 +1825,8 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         {answeredBy ? ` · Last answer from ${answeredBy}` : ''}
       </p>
     </section>
+    {voiceActive && createPortal(voiceScreen, document.body)}
+    </>
   )
 }
 
