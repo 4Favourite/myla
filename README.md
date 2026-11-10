@@ -79,6 +79,26 @@ The dashboard has a bottom tab bar: Today, Chat, Reminders, Memory and More (Set
 
 The chat has a voice panel: tap the mic, speak, and tap Done (or stay quiet for your chosen time: 2, 3 or 5 seconds, or only when you tap Done). The browser stops listening at short pauses, so the app keeps listening and joins what you said. It shows a live transcript and animations for listening, thinking and speaking. There is an option to read replies aloud with a voice you choose. Tapping the orb while Myla speaks stops her, and talking over her stops her too. Times are shown in 12-hour format, and Settings uses a 12-hour time picker. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
 
+## Spoken replies and better listening in the app (8b)
+
+The Android app's built-in browser engine cannot speak, so inside the app replies are spoken with the phone's own text-to-speech through `@capacitor-community/text-to-speech`:
+
+```
+npm install @capacitor-community/text-to-speech --legacy-peer-deps
+```
+
+Android 11 and newer also need this block inside `<manifest>` in `AndroidManifest.xml` (above `</manifest>`, not inside `<application>`), so the app can find the speech engine:
+
+```
+<queries>
+    <intent>
+        <action android:name="android.intent.action.TTS_SERVICE" />
+    </intent>
+</queries>
+```
+
+To make Myla hear her name and your words better: the listening language can be chosen (it defaults to English, Nigeria when the Settings timezone is Africa/Lagos); the phone is asked for several guesses and the one containing "Myla" or the name you asked her to call you is preferred; common mishearings of "Myla" right after a greeting are corrected; and the AI is told that speech recognition makes mistakes with names. The listening beeps are Android's own.
+
 ## Voice mode (8a)
 
 A full-screen, hands-free voice conversation, opened with the floating mic button or "Voice mode" in Chat. Myla listens, answers out loud, then listens again by herself; the microphone is off while she speaks, so she cannot hear herself. Tap the orb to interrupt her or to send what you said right away. It pauses itself after two silent rounds or on any error (including a rate limit), and there are Pause, Transcript, Chimes and End controls. The animated orb and ring of bars show listening, thinking and speaking (the animation is drawn, not driven by the microphone level). Everything said is saved in the same chat, as voice messages. Spoken turns tell the function to keep replies to a few sentences and to send less history, to save the free AI allowance. Each reply can end with a "Suggestions:" line, which the function strips off and returns as tappable chips (also falling back to a default set). Delete and other risky actions still need a tap on the Confirm card.

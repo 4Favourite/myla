@@ -7,20 +7,33 @@ import { isValidZone, zonedTimeToUtc, zoneYmd } from './time'
 import {
   isNative,
   listenForDelivery,
+  nativeSpeak,
   nativeSpeechReady,
+  nativeStopSpeaking,
+  nativeVoices,
   openExactAlarmSettings,
   requestNotifications,
   scheduleSummaryTest,
   scheduleTest,
+  setSpeechVocabulary,
   startNativeSegment,
   stopNativeListening,
   syncPhone,
 } from './native'
-import type { PhoneStatus } from './native'
+import type { NativeVoice, PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '8a'
+const WEB_VERSION = '8b'
+
+// Speech recognition often mishears the name Myla ("my love", "Mila"...). Fix the
+// common slips when they come right after a greeting or at the very start.
+function fixHeard(text: string): string {
+  const slips = 'my love|my la|my luh|my lah|mi la|mila|milla|miley|mylah|mayla|maila|malia|myler|my lover'
+  return text
+    .replace(new RegExp(`\\b(hello|hi|hey|ok|okay|thanks|thank you|please|good morning|good afternoon|good evening)[,\\s]+(${slips})\\b`, 'gi'), '$1, Myla')
+    .replace(new RegExp(`^(${slips})\\b`, 'i'), 'Myla')
+}
 
 // Tapping the morning summary alert opens Chat and asks for a fresh summary.
 let summaryRequested = false
@@ -291,6 +304,7 @@ function Dashboard({ email }: { email: string }) {
   const loadName = useCallback(async () => {
     const { data } = await supabase.from('settings').select('display_name, timezone').maybeSingle()
     setDisplayName(typeof data?.display_name === 'string' ? data.display_name : '')
+    if (isNative && typeof data?.display_name === 'string') setSpeechVocabulary(data.display_name.split(/\s+/))
     setAppZone(typeof data?.timezone === 'string' ? data.timezone : '')
     setZoneTick((t) => t + 1)
   }, [])
@@ -873,7 +887,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   }, [])
   const voiceRef = useRef<VoiceSession | null>(null)
   const voiceSupported = isNative || getRecognitionCtor() !== null
-  const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
+  const speechSupported = isNative || (typeof window !== 'undefined' && 'speechSynthesis' in window)
   const [listening, setListening] = useState(false)
   const [heard, setHeard] = useState('')
   const [speaking, setSpeaking] = useState(false)
@@ -885,6 +899,8 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const [speakReplies, setSpeakReplies] = useState(() => readSetting('myla.speak') === '1')
   const [voiceName, setVoiceName] = useState(() => readSetting('myla.voice') ?? '')
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
+  const [nativeVoiceList, setNativeVoiceList] = useState<NativeVoice[]>([])
+  const [langPref, setLangPref] = useState(() => readSetting('myla.lang') ?? '')
 
   // The list of past chats, newest first.
   const loadChats = useCallback(async () => {
@@ -975,9 +991,20 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     void sendText(draft.trim())
   }
 
+  // The language to listen for. Defaults to Nigerian English when your timezone is Lagos.
+  function listenLanguage(): string {
+    return langPref || (activeZone() === 'Africa/Lagos' ? 'en-NG' : navigator.language || 'en-US')
+  }
+
+  // Inside the Android app the phone's own voices are used.
+  useEffect(() => {
+    if (!isNative) return
+    void nativeVoices().then((list) => setNativeVoiceList(list))
+  }, [])
+
   // The list of voices this device offers (it can fill in a moment after loading).
   useEffect(() => {
-    if (!speechSupported) return
+    if (!speechSupported || isNative) return
     const load = () => setVoices(window.speechSynthesis.getVoices())
     load()
     window.speechSynthesis.addEventListener('voiceschanged', load)
@@ -985,7 +1012,8 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   }, [speechSupported])
 
   function stopSpeaking() {
-    if (speechSupported) window.speechSynthesis.cancel()
+    if (isNative) void nativeStopSpeaking()
+    else if (speechSupported) window.speechSynthesis.cancel()
     setSpeaking(false)
     setAwaitingSpeech(false)
   }
@@ -1019,8 +1047,30 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     }
   }
 
+  // Spoken reply inside the Android app, using the phone's own voice.
+  async function speakNative(text: string) {
+    const female = nativeVoiceList.find((v) => v.lang.toLowerCase().startsWith('en') && /female/i.test(v.name))
+    const english = nativeVoiceList.find((v) => v.lang.toLowerCase().startsWith('en'))
+    const chosen = nativeVoiceList.find((v) => v.name === voiceName) ?? female ?? english
+    setAwaitingSpeech(true)
+    try {
+      setSpeaking(true)
+      setAwaitingSpeech(false)
+      await nativeSpeak(text, chosen?.lang ?? listenLanguage(), chosen?.index)
+    } catch (caught) {
+      setError(`Could not speak the reply: ${caught instanceof Error ? caught.message : 'unknown error'}`)
+    } finally {
+      setSpeaking(false)
+      setAwaitingSpeech(false)
+    }
+  }
+
   function speak(text: string) {
     if (!speechSupported || (!speakReplies && !voiceActiveRef.current)) return
+    if (isNative) {
+      void speakNative(text)
+      return
+    }
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(text)
     const chosen = voices.find((v) => v.name === voiceName) ?? preferredVoice(voices)
@@ -1066,7 +1116,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       session.text = `${session.text} ${session.interim}`.trim()
       session.interim = ''
     }
-    const said = session.text.trim()
+    const said = fixHeard(session.text.trim())
     if (session.cancelled) return
     if (session.failed) {
       if (voiceActiveRef.current) pauseVoice()
@@ -1137,7 +1187,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
           finishListening()
         },
       },
-      navigator.language || 'en-US',
+      listenLanguage(),
     )
   }
 
@@ -1145,7 +1195,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
     const Ctor = getRecognitionCtor()
     if (!Ctor) return
     const recognition = new Ctor()
-    recognition.lang = navigator.language || 'en-US'
+    recognition.lang = listenLanguage()
     recognition.interimResults = true
     recognition.continuous = false
     recognition.onresult = (event) => {
@@ -1766,6 +1816,21 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         </form>
         <div className="voice-options">
           <label className="inline">
+            I speak
+            <select
+              value={langPref}
+              onChange={(e) => {
+                setLangPref(e.target.value)
+                writeSetting('myla.lang', e.target.value)
+              }}
+            >
+              <option value="">Automatic ({listenLanguage()})</option>
+              <option value="en-NG">English (Nigeria)</option>
+              <option value="en-US">English (US)</option>
+              <option value="en-GB">English (UK)</option>
+            </select>
+          </label>
+          <label className="inline">
             Wait after I pause
             <select
               value={pauseMs}
@@ -1795,16 +1860,26 @@ function Chat({ onActivity }: { onActivity: () => void }) {
                 />
                 Read replies aloud
               </label>
-              {speakReplies && voices.length > 0 && (
+              {speakReplies && (isNative ? nativeVoiceList.length > 0 : voices.length > 0) && (
                 <select
                   aria-label="Voice"
-                  value={voiceName || preferredVoice(voices)?.name || ''}
+                  value={
+                    voiceName ||
+                    (isNative
+                      ? (nativeVoiceList.find((v) => v.lang.toLowerCase().startsWith('en') && /female/i.test(v.name))?.name ??
+                        nativeVoiceList.find((v) => v.lang.toLowerCase().startsWith('en'))?.name ??
+                        '')
+                      : (preferredVoice(voices)?.name ?? ''))
+                  }
                   onChange={(e) => {
                     setVoiceName(e.target.value)
                     writeSetting('myla.voice', e.target.value)
                   }}
                 >
-                  {voices.map((v) => (
+                  {(isNative
+                    ? nativeVoiceList.map((v) => ({ name: v.name, lang: v.lang }))
+                    : voices.map((v) => ({ name: v.name, lang: v.lang }))
+                  ).map((v) => (
                     <option key={`${v.name}-${v.lang}`} value={v.name}>
                       {v.name} ({v.lang})
                     </option>

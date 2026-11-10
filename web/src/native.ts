@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { SpeechRecognition } from '@capgo/capacitor-speech-recognition'
+import { TextToSpeech } from '@capacitor-community/text-to-speech'
 import { supabase } from './lib/supabase'
 
 // Everything here only runs inside the Android app. In a normal browser the
@@ -340,6 +341,19 @@ export async function listenForDelivery(onChange: () => void, onSummaryTap: () =
 // speech recognition, so this uses the phone's own recognizer through a plugin.
 // ---------------------------------------------------------------------------
 
+// Words the phone's recognizer should prefer when it offers several guesses
+// (for example "Myla" over "my love", and the name you asked Myla to call you).
+let vocabulary: string[] = ['myla']
+
+export function setSpeechVocabulary(words: string[]) {
+  vocabulary = ['myla', ...words.map((w) => w.trim().toLowerCase()).filter((w) => w.length > 2)]
+}
+
+function pickBest(matches: string[]): string {
+  const known = matches.find((m) => vocabulary.some((w) => m.toLowerCase().includes(w)))
+  return known ?? matches[0] ?? ''
+}
+
 export async function nativeSpeechReady(): Promise<{ ok: boolean; reason?: string }> {
   try {
     const status = await SpeechRecognition.available()
@@ -377,7 +391,7 @@ export async function startNativeSegment(
   }
   handles.push(
     await SpeechRecognition.addListener('partialResults', (event) => {
-      const text = event.matches?.[0] ?? ''
+      const text = pickBest(event.matches ?? [])
       if (text) {
         last = text
         handlers.onPartial(text)
@@ -394,7 +408,7 @@ export async function startNativeSegment(
     }),
   )
   try {
-    await SpeechRecognition.start({ language, maxResults: 1, partialResults: true, popup: false })
+    await SpeechRecognition.start({ language, maxResults: 5, partialResults: true, popup: false })
   } catch (caught) {
     if (!finished) {
       finished = true
@@ -409,5 +423,41 @@ export async function stopNativeListening(): Promise<void> {
     await SpeechRecognition.stop()
   } catch {
     // already stopped
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Spoken replies inside the Android app, using the phone's own text-to-speech.
+// (The app's built-in browser engine cannot speak.)
+// ---------------------------------------------------------------------------
+
+export type NativeVoice = { index: number; name: string; lang: string }
+
+export async function nativeVoices(): Promise<NativeVoice[]> {
+  try {
+    const result = await TextToSpeech.getSupportedVoices()
+    return result.voices.map((v, index) => ({ index, name: v.name, lang: v.lang }))
+  } catch {
+    return []
+  }
+}
+
+// Resolves when Myla has finished speaking (or the speech was stopped).
+export async function nativeSpeak(text: string, lang: string, voiceIndex?: number): Promise<void> {
+  await TextToSpeech.speak({
+    text,
+    lang,
+    rate: 1.0,
+    pitch: 1.0,
+    volume: 1.0,
+    ...(voiceIndex !== undefined ? { voice: voiceIndex } : {}),
+  })
+}
+
+export async function nativeStopSpeaking(): Promise<void> {
+  try {
+    await TextToSpeech.stop()
+  } catch {
+    // nothing was speaking
   }
 }
