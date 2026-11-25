@@ -79,6 +79,24 @@ The dashboard has a bottom tab bar: Today, Chat, Reminders, Memory and More (Set
 
 The chat has a voice panel: tap the mic, speak, and tap Done (or stay quiet for your chosen time: 2, 3 or 5 seconds, or only when you tap Done). The browser stops listening at short pauses, so the app keeps listening and joins what you said. It shows a live transcript and animations for listening, thinking and speaking. There is an option to read replies aloud with a voice you choose. Tapping the orb while Myla speaks stops her, and talking over her stops her too. Times are shown in 12-hour format, and Settings uses a 12-hour time picker. It uses the browser's own speech recognition and voices, which are free but vary by device, and the browser usually sends the audio to its maker's speech service. Voice messages are stored with input mode `voice`. Inside the Android app (a WebView) browser speech recognition is not available, so the Talk button is disabled there until a native speech plugin is added.
 
+## Phone actions (9a)
+
+In the Android app Myla can open an app by name, ask your music app to play something, and lock the screen. These are "phone tools" (`open_app`, `play_music`, `lock_phone`, tier 3): the function checks and logs the request, hands it to the phone, and the phone carries it out with Myla's own plugin (`MylaDevicePlugin.java`, registered in `MainActivity.java`). The phone then reports the real outcome (`action: device_result`), which finishes the activity log entry and is shown under Myla's reply, so she can never claim an action happened when it did not. After reading email, these (like any change) need a Confirm tap. They only work when the app reports that the plugin is available.
+
+- Opening apps needs the `QUERY_ALL_PACKAGES` permission (fine for an app installed by hand) so Myla can find an app by its name.
+- Playing music sends Android's standard "play from search" request to the music app chosen in the This phone panel. Some apps start playing at once, others only open a search, so Myla says she asked the phone and the result line says what happened.
+- Locking the screen needs the user to allow Myla as a device administrator with the single "force lock" policy (Allow locking in the This phone panel). To uninstall Myla later, remove it from the device administrator list first (Settings, Security, Device admin apps).
+
+## Several Gmail accounts and watch rules (8e)
+
+Myla can read up to five Gmail accounts together. Google requires each account to be authorised once, so each extra account needs its own refresh token (from the OAuth Playground, signed in as that account, using the same client ID and secret), saved as a Supabase secret: `GMAIL_REFRESH_TOKEN` for the first, then `GMAIL_REFRESH_TOKEN_2` to `GMAIL_REFRESH_TOKEN_5`. While the Google app is in Testing, each account must also be listed as a test user, and each token expires after about a week. Results are merged into one list, each message shows its account, and if one account fails the others still work and the failure is shown.
+
+You can tell Myla what to always look out for (for example "always look out for emails about invoices"), or add rules by hand in the Email tab: a word or topic, or an email address, marked "always look out for it" or "keep it quiet". Topic rules also search your promotions and social tabs, so a watched message is not missed. Rules live in `attention_rules` (migration `0004_rule_match_type.sql` adds the match type). Tools: `add_email_rule` and `list_email_rules`.
+
+## Learning what matters in email (8c)
+
+What you dismiss, open or turn into a task in the Email tab is recorded in `attention_signals`. When a pattern is clear (a sender you dismissed 3 times and never opened, or opened or acted on 2 times and never dismissed) the Email tab suggests a rule. Nothing changes unless you say yes. Rules live in `attention_rules` (migration `0003_attention_rules.sql`): an important sender is shown first and marked, and a quiet sender is hidden from Needs attention (but still counted, and still shown in All unread). Saying no is remembered so it is not suggested again. Active rules are listed in "Your email rules" with a Remove button, and Myla's `check_email` tool applies the same rules and reports how many messages they hid.
+
 ## Spoken replies and better listening in the app (8b)
 
 The Android app's built-in browser engine cannot speak, so inside the app replies are spoken with the phone's own text-to-speech through `@capacitor-community/text-to-speech`:

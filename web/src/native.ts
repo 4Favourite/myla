@@ -1,4 +1,4 @@
-import { Capacitor } from '@capacitor/core'
+import { Capacitor, registerPlugin } from '@capacitor/core'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { SpeechRecognition } from '@capgo/capacitor-speech-recognition'
 import { TextToSpeech } from '@capacitor-community/text-to-speech'
@@ -460,4 +460,98 @@ export async function nativeStopSpeaking(): Promise<void> {
   } catch {
     // nothing was speaking
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phone actions: open an app, ask a music app to play something, lock the screen.
+// These use Myla's own Android plugin (MylaDevicePlugin.java). Every answer says
+// what really happened.
+// ---------------------------------------------------------------------------
+
+export type DeviceApp = { name: string; packageName: string }
+
+interface MylaDevicePlugin {
+  listApps(): Promise<{ apps: DeviceApp[] }>
+  openApp(options: { name: string }): Promise<{ opened: boolean; label?: string; packageName?: string; reason?: string }>
+  playMusic(options: { query: string; packageName?: string }): Promise<{
+    started: boolean
+    opened_app_only?: boolean
+    label?: string
+    reason?: string
+  }>
+  lockScreen(): Promise<{ locked: boolean; reason?: string }>
+  adminStatus(): Promise<{ active: boolean }>
+  requestAdmin(): Promise<{ requested: boolean }>
+}
+
+const MylaDevice = registerPlugin<MylaDevicePlugin>('MylaDevice')
+
+// False in a browser, and in an older build of the app that lacks the plugin.
+export async function deviceAvailable(): Promise<boolean> {
+  if (!isNative) return false
+  try {
+    await MylaDevice.adminStatus()
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function deviceApps(): Promise<DeviceApp[]> {
+  try {
+    return (await MylaDevice.listApps()).apps
+  } catch {
+    return []
+  }
+}
+
+export async function deviceAdminActive(): Promise<boolean> {
+  try {
+    return (await MylaDevice.adminStatus()).active
+  } catch {
+    return false
+  }
+}
+
+export async function deviceRequestAdmin(): Promise<void> {
+  await MylaDevice.requestAdmin()
+}
+
+// Carries out one request from Myla and reports the real outcome.
+export async function runDeviceAction(
+  action: string,
+  args: Record<string, unknown>,
+  musicPackage: string,
+): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (action === 'open_app') {
+      const result = await MylaDevice.openApp({ name: String(args.name ?? '') })
+      return result.opened
+        ? { ok: true, detail: `Opened ${result.label ?? 'the app'}.` }
+        : { ok: false, detail: result.reason ?? 'Could not open that app.' }
+    }
+    if (action === 'play_music') {
+      const query = String(args.query ?? '').trim()
+      const result = await MylaDevice.playMusic({ query, packageName: musicPackage || undefined })
+      if (result.started) {
+        return {
+          ok: true,
+          detail: `Asked ${result.label ?? 'your music app'} to play "${query}". If nothing plays, that app may not accept play requests.`,
+        }
+      }
+      if (result.opened_app_only) {
+        return { ok: false, detail: `Opened the music app, but it would not start "${query}" by itself. Search for it there.` }
+      }
+      return { ok: false, detail: result.reason ?? 'Could not start the music.' }
+    }
+    if (action === 'lock_phone') {
+      const result = await MylaDevice.lockScreen()
+      return result.locked
+        ? { ok: true, detail: 'Locked the screen.' }
+        : { ok: false, detail: result.reason ?? 'Could not lock the screen.' }
+    }
+  } catch (caught) {
+    return { ok: false, detail: caught instanceof Error ? caught.message : 'The phone could not do that.' }
+  }
+  return { ok: false, detail: `The phone does not know the action "${action}".` }
 }

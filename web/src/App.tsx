@@ -6,6 +6,10 @@ import { configError, supabase } from './lib/supabase'
 import { isValidZone, zonedTimeToUtc, zoneYmd } from './time'
 import {
   isNative,
+  deviceAdminActive,
+  deviceApps,
+  deviceAvailable,
+  deviceRequestAdmin,
   listenForDelivery,
   nativeSpeak,
   nativeSpeechReady,
@@ -13,6 +17,7 @@ import {
   nativeVoices,
   openExactAlarmSettings,
   requestNotifications,
+  runDeviceAction,
   scheduleSummaryTest,
   scheduleTest,
   setSpeechVocabulary,
@@ -20,11 +25,17 @@ import {
   stopNativeListening,
   syncPhone,
 } from './native'
-import type { NativeVoice, PhoneStatus } from './native'
+import type { DeviceApp, NativeVoice, PhoneStatus } from './native'
 import './App.css'
 
 // Shown at the bottom of the page so you can tell which version you are looking at.
-const WEB_VERSION = '8b'
+const WEB_VERSION = '9a'
+
+// "Name <person@site.com>" becomes "person@site.com"
+function addressOf(from: string): string {
+  const match = from.match(/<([^>]+)>/)
+  return (match ? match[1] : from).trim().toLowerCase()
+}
 
 // Speech recognition often mishears the name Myla ("my love", "Mila"...). Fix the
 // common slips when they come right after a greeting or at the very start.
@@ -635,6 +646,12 @@ function Section({ title, tasks, emptyText, overdue, onToggle, onDelete }: Secti
   )
 }
 
+type DeviceRequest = {
+  id: string
+  action: string
+  args: Record<string, unknown>
+}
+
 type ChatAction = {
   label: string
   status: string
@@ -815,7 +832,7 @@ type ChatMessage = {
 
 function actionMark(status: string): string {
   if (status === 'succeeded') return '✓'
-  if (status === 'awaiting_confirmation') return '…'
+  if (status === 'awaiting_confirmation' || status === 'sent') return '…'
   if (status === 'cancelled') return '–'
   return '✕'
 }
@@ -874,6 +891,10 @@ function Chat({ onActivity }: { onActivity: () => void }) {
   const openVoiceRef = useRef<() => void>(() => {})
   const listRef = useRef<HTMLDivElement>(null)
   const sendTextRef = useRef<(text: string, mode?: 'text' | 'voice') => Promise<void>>(sendText)
+  const canActRef = useRef(false)
+  useEffect(() => {
+    if (isNative) void deviceAvailable().then((ok) => (canActRef.current = ok))
+  }, [])
   useEffect(() => {
     sendTextRef.current = sendText
   })
@@ -1417,6 +1438,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
           client: localClientTime(),
           input_mode: mode,
           spoken: voiceActiveRef.current,
+          device: canActRef.current,
         },
       })
       if (invokeError) {
@@ -1435,6 +1457,7 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         version?: string
         model?: string
         suggestions?: string[]
+        device_requests?: DeviceRequest[]
       } | null
       if (!result?.reply) {
         setMessages((current) => current.filter((m) => m.id !== pendingId))
@@ -1450,16 +1473,20 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       if (result.version) setFunctionVersion(result.version)
       if (result.model) setAnsweredBy(result.model)
       if (result.conversation_id) setConversationId(result.conversation_id)
+      const replyId = `reply-${Date.now()}`
       setMessages((current) => [
         ...current,
         {
-          id: `reply-${Date.now()}`,
+          id: replyId,
           role: 'assistant',
           content: replyText,
           actions: result.actions,
           confirmations: result.confirmations,
         },
       ])
+      if (result.device_requests && result.device_requests.length > 0) {
+        void performDeviceRequests(result.device_requests, replyId)
+      }
     } catch (caught) {
       setMessages((current) => current.filter((m) => m.id !== pendingId))
       setDraft(text)
@@ -1470,6 +1497,30 @@ function Chat({ onActivity }: { onActivity: () => void }) {
       void loadChats()
       onActivity()
     }
+  }
+
+  // Myla asked the phone to do something. Do it, then tell the backend what really
+  // happened so the activity log is true, and show the real outcome.
+  async function performDeviceRequests(requests: DeviceRequest[], messageId: string) {
+    const musicPackage = readSetting('myla.musicApp') ?? ''
+    const phoneActions: ChatAction[] = []
+    for (const request of requests) {
+      const outcome = await runDeviceAction(request.action, request.args, musicPackage)
+      phoneActions.push({ label: 'On your phone', status: outcome.ok ? 'succeeded' : 'failed', summary: outcome.detail })
+      await supabase.functions.invoke('chat', {
+        body: {
+          action: 'device_result',
+          id: request.id,
+          ok: outcome.ok,
+          detail: outcome.detail.slice(0, 200),
+          client: localClientTime(),
+        },
+      })
+    }
+    setMessages((current) =>
+      current.map((m) => (m.id === messageId ? { ...m, actions: [...(m.actions ?? []), ...phoneActions] } : m)),
+    )
+    onActivity()
   }
 
   // The user's own yes or no. The AI is not involved in this step.
@@ -1489,20 +1540,24 @@ function Chat({ onActivity }: { onActivity: () => void }) {
         setError(await describeFunctionError(invokeError))
         return
       }
-      const result = data as { reply?: string; actions?: ChatAction[] } | null
+      const result = data as { reply?: string; actions?: ChatAction[]; device_requests?: DeviceRequest[] } | null
       if (!result?.reply) {
         setError('No result came back. Check Recent activity to see what happened.')
         return
       }
       const replyText = result.reply
+      const resultId = `result-${Date.now()}`
       setMessages((current) => [
         ...current.map((m) =>
           m.id === messageId
             ? { ...m, confirmations: (m.confirmations ?? []).filter((c) => c.id !== confirmationId) }
             : m,
         ),
-        { id: `result-${Date.now()}`, role: 'assistant', content: replyText, actions: result.actions },
+        { id: resultId, role: 'assistant', content: replyText, actions: result.actions },
       ])
+      if (result.device_requests && result.device_requests.length > 0) {
+        void performDeviceRequests(result.device_requests, resultId)
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
     } finally {
@@ -2467,6 +2522,24 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [actionsReady, setActionsReady] = useState<boolean | null>(null)
+  const [lockAllowed, setLockAllowed] = useState(false)
+  const [apps, setApps] = useState<DeviceApp[]>([])
+  const [musicPackage, setMusicPackage] = useState(() => readSetting('myla.musicApp') ?? '')
+
+  // Phone actions: is the phone plugin there, may Myla lock the screen, which apps exist.
+  const loadActions = useCallback(async () => {
+    const ready = await deviceAvailable()
+    setActionsReady(ready)
+    if (ready) {
+      setLockAllowed(await deviceAdminActive())
+      setApps(await deviceApps())
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadActions()
+  }, [loadActions, version])
 
   const run = useCallback(async () => {
     try {
@@ -2589,6 +2662,47 @@ function PhoneSetup({ version, onChange }: { version: number; onChange: () => vo
             Test summary alert
           </button>
         </div>
+        <div className="phone-status">
+          <span>
+            Phone actions (open apps, play music, lock the screen):{' '}
+            {actionsReady === null ? 'checking' : actionsReady ? 'available' : 'not available in this version of the app'}
+          </span>
+          {actionsReady && (
+            <>
+              <span>Locking the screen: {lockAllowed ? 'allowed' : 'not allowed yet'}</span>
+              <label className="inline">
+                Music app
+                <select
+                  value={musicPackage}
+                  onChange={(e) => {
+                    setMusicPackage(e.target.value)
+                    writeSetting('myla.musicApp', e.target.value)
+                  }}
+                >
+                  <option value="">Let the phone choose</option>
+                  {apps.map((a) => (
+                    <option key={a.packageName} value={a.packageName}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+        </div>
+        {actionsReady && !lockAllowed && (
+          <div className="quick">
+            <button
+              className="btn small"
+              disabled={busy}
+              onClick={() =>
+                void act(deviceRequestAdmin, 'Allow Myla in the screen that opened, then come back here.')
+              }
+            >
+              Allow locking
+            </button>
+          </div>
+        )}
         <p className="muted small">
           On Xiaomi and Redmi phones, allow autostart for Myla and set its battery option to No
           restrictions, or alerts may arrive late. If you restart the phone, open Myla once so it can
@@ -2608,6 +2722,27 @@ type EmailItem = {
   category: string
   asks_question: boolean
   mentions_deadline: boolean
+  sender?: string
+  important?: boolean
+  quiet?: boolean
+  watched?: boolean
+  account?: string
+}
+
+type AttentionRule = {
+  id: string
+  sender: string
+  kind: 'important' | 'quiet'
+  status: 'active' | 'rejected'
+  match_type?: 'sender' | 'keyword'
+}
+
+type AccountSummary = { account: string; inbox_unread: number | null }
+
+type RuleSuggestion = {
+  sender: string
+  kind: 'important' | 'quiet'
+  reason: string
 }
 
 type EmailCounts = {
@@ -2629,6 +2764,117 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
+  const [rules, setRules] = useState<AttentionRule[]>([])
+  const [suggestions, setSuggestions] = useState<RuleSuggestion[]>([])
+  const [hiddenByRules, setHiddenByRules] = useState(0)
+  const [accountsInfo, setAccountsInfo] = useState<AccountSummary[]>([])
+  const [accountErrors, setAccountErrors] = useState<{ account: string; error: string }[]>([])
+  const [newRule, setNewRule] = useState('')
+  const [newRuleMatch, setNewRuleMatch] = useState<'keyword' | 'sender'>('keyword')
+  const [newRuleKind, setNewRuleKind] = useState<'important' | 'quiet'>('important')
+
+  // What Myla has noticed from what you dismiss and open. She only suggests.
+  const loadLearning = useCallback(async () => {
+    const [firstTry, signalResult] = await Promise.all([
+      supabase.from('attention_rules').select('id, sender, kind, status, match_type').eq('source', 'gmail').limit(500),
+      supabase
+        .from('attention_signals')
+        .select('action, details')
+        .eq('source', 'gmail')
+        .order('created_at', { ascending: false })
+        .limit(500),
+    ])
+    let ruleRows: unknown[] | null = firstTry.data
+    if (firstTry.error) {
+      // the match_type column is missing (migration 0004 not run yet)
+      const plain = await supabase.from('attention_rules').select('id, sender, kind, status').eq('source', 'gmail').limit(500)
+      ruleRows = plain.data
+    }
+    const ruleList = ((ruleRows ?? []) as AttentionRule[]).filter((r) => r.sender)
+    setRules(ruleList)
+    const counts = new Map<string, { acted: number; dismissed: number }>()
+    for (const row of signalResult.data ?? []) {
+      const from = (row.details as { from?: string } | null)?.from
+      if (!from) continue
+      const sender = addressOf(from)
+      const entry = counts.get(sender) ?? { acted: 0, dismissed: 0 }
+      if (row.action === 'acted') entry.acted += 1
+      if (row.action === 'dismissed') entry.dismissed += 1
+      counts.set(sender, entry)
+    }
+    const found: RuleSuggestion[] = []
+    counts.forEach((c, sender) => {
+      const has = (kind: string) => ruleList.some((r) => r.sender === sender && r.kind === kind && r.match_type !== 'keyword')
+      if (c.dismissed >= 3 && c.acted === 0 && !has('quiet')) {
+        found.push({ sender, kind: 'quiet', reason: `You dismissed ${c.dismissed} messages from ${sender} and opened none.` })
+      } else if (c.acted >= 2 && c.dismissed === 0 && !has('important')) {
+        found.push({ sender, kind: 'important', reason: `You opened or acted on ${c.acted} messages from ${sender}.` })
+      }
+    })
+    setSuggestions(found.slice(0, 5))
+  }, [])
+
+  useEffect(() => {
+    void loadLearning()
+  }, [loadLearning])
+
+  async function answerSuggestion(suggestion: RuleSuggestion, accept: boolean) {
+    const { error: ruleError } = await supabase.from('attention_rules').upsert(
+      {
+        source: 'gmail',
+        sender: suggestion.sender,
+        kind: suggestion.kind,
+        status: accept ? 'active' : 'rejected',
+        reason: suggestion.reason,
+      },
+      { onConflict: 'user_id,source,sender,kind' },
+    )
+    if (ruleError) {
+      setError(`Could not save that: ${ruleError.message}`)
+      return
+    }
+    setNotice(accept ? 'Saved. It applies the next time you check your email.' : 'Okay, I will not suggest that again.')
+    await loadLearning()
+  }
+
+  async function addRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const pattern = newRule.trim().toLowerCase()
+    if (!pattern) return
+    const { error: ruleError } = await supabase.from('attention_rules').upsert(
+      {
+        source: 'gmail',
+        sender: pattern,
+        kind: newRuleKind,
+        match_type: newRuleMatch,
+        status: 'active',
+        reason: 'You added it',
+      },
+      { onConflict: 'user_id,source,sender,kind' },
+    )
+    if (ruleError) {
+      setError(
+        /match_type/i.test(ruleError.message)
+          ? 'The email rules table needs its update first (migration 0004).'
+          : `Could not save the rule: ${ruleError.message}`,
+      )
+      return
+    }
+    setNewRule('')
+    setNotice('Saved. It applies the next time you check your email.')
+    await loadLearning()
+  }
+
+  async function removeRule(rule: AttentionRule) {
+    const { data, error: deleteError } = await supabase
+      .from('attention_rules')
+      .delete()
+      .eq('id', rule.id)
+      .select('id')
+    if (deleteError) setError(`Could not remove the rule: ${deleteError.message}`)
+    else if (!data || data.length === 0) setError('The rule was not removed. Nothing changed.')
+    else await loadLearning()
+  }
 
   async function check(nextScope: 'attention' | 'all_unread') {
     setLoading(true)
@@ -2642,7 +2888,14 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
         setError(await describeFunctionError(invokeError))
         return
       }
-      const result = data as { items?: EmailItem[]; counts?: EmailCounts; checked_at?: string } | null
+      const result = data as {
+        items?: EmailItem[]
+        counts?: EmailCounts
+        checked_at?: string
+        hidden_by_rules?: number
+        accounts?: AccountSummary[]
+        account_errors?: { account: string; error: string }[]
+      } | null
       if (!result?.items) {
         setError('No email information came back.')
         return
@@ -2655,12 +2908,16 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
         .limit(1000)
       setDismissed(new Set((rows ?? []).map((r) => String(r.item_ref))))
       setItems(result.items)
+      setHiddenByRules(result.hidden_by_rules ?? 0)
+      setAccountsInfo(result.accounts ?? [])
+      setAccountErrors(result.account_errors ?? [])
       setCounts(result.counts ?? null)
       setCheckedAt(result.checked_at ? new Date(result.checked_at) : new Date())
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
     } finally {
       setLoading(false)
+      void loadLearning()
     }
   }
 
@@ -2732,6 +2989,32 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
         </button>
       </div>
 
+      {suggestions.length > 0 && (
+        <div className="card learning">
+          <p className="small">
+            <strong>Something I noticed.</strong> I only change what I show you if you say yes.
+          </p>
+          {suggestions.map((sg) => (
+            <div key={`${sg.sender}-${sg.kind}`} className="suggestion">
+              <span className="small">
+                {sg.reason}{' '}
+                {sg.kind === 'quiet'
+                  ? 'Hide them from Needs attention?'
+                  : 'Treat them as important and show them first?'}
+              </span>
+              <span className="email-actions">
+                <button className="btn small" onClick={() => void answerSuggestion(sg, true)}>
+                  {sg.kind === 'quiet' ? 'Yes, hide them' : 'Yes, mark important'}
+                </button>
+                <button className="btn ghost small" onClick={() => void answerSuggestion(sg, false)}>
+                  No thanks
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {error && (
         <p className="error" role="alert">
           {error}
@@ -2739,11 +3022,67 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
       )}
       {notice && <p className="muted small">{notice}</p>}
 
+      <details className="card learning">
+        <summary className="small">
+          Always look out for… ({rules.filter((r) => r.status === 'active').length} rules)
+        </summary>
+        <form className="rule-form" onSubmit={addRule}>
+          <input
+            aria-label="Word, phrase or email address"
+            placeholder={newRuleMatch === 'keyword' ? 'For example: invoice, interview, my bank' : 'For example: boss@company.com'}
+            value={newRule}
+            onChange={(e) => setNewRule(e.target.value)}
+          />
+          <select value={newRuleMatch} onChange={(e) => setNewRuleMatch(e.target.value as 'keyword' | 'sender')}>
+            <option value="keyword">a word or topic</option>
+            <option value="sender">an email address</option>
+          </select>
+          <select value={newRuleKind} onChange={(e) => setNewRuleKind(e.target.value as 'important' | 'quiet')}>
+            <option value="important">always look out for it</option>
+            <option value="quiet">keep it quiet</option>
+          </select>
+          <button className="btn small" type="submit" disabled={!newRule.trim()}>
+            Add rule
+          </button>
+        </form>
+        <p className="muted small">
+          You can also just tell Myla in Chat, for example: Always look out for emails about invoices.
+        </p>
+        {rules
+          .filter((r) => r.status === 'active')
+          .map((r) => (
+            <div key={r.id} className="suggestion">
+              <span className="small">
+                {r.match_type === 'keyword' ? `The topic “${r.sender}”` : r.sender}:{' '}
+                {r.kind === 'quiet' ? 'kept out of Needs attention' : 'looked out for and shown first'}
+              </span>
+              <button className="btn ghost small" onClick={() => void removeRule(r)}>
+                Remove
+              </button>
+            </div>
+          ))}
+      </details>
+
+      {accountErrors.map((e) => (
+        <p key={e.account} className="error" role="alert">
+          {e.account}: {e.error}
+        </p>
+      ))}
+
+      {accountsInfo.length > 1 && (
+        <p className="muted small">
+          {accountsInfo
+            .map((a) => `${a.account}: ${a.inbox_unread ?? 'unknown'} unread`)
+            .join(' · ')}
+        </p>
+      )}
+
       {counts && (
         <p className="muted small">
           Unread in inbox: {count(counts.inbox_unread)} (promotions {count(counts.promotions_unread)}, social{' '}
           {count(counts.social_unread)}, updates {count(counts.updates_unread)}, forums{' '}
           {count(counts.forums_unread)}). Showing {visible.length} of the latest
+          {hiddenByRules > 0 ? `, with ${hiddenByRules} hidden by your quiet rules` : ''}
           {checkedAt
             ? `, checked ${checkedAt.toLocaleTimeString([], { ...tzOpt(), hour: 'numeric', minute: '2-digit', hour12: true })}`
             : ''}
@@ -2762,6 +3101,14 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
               {item.date ? ` · ${item.date}` : ''}
             </span>
             <span className="email-snippet">{item.snippet}</span>
+            {accountsInfo.length > 1 && item.account && <span className="chip">{item.account}</span>}
+            {(item.important || item.quiet) && (
+              <span className="chips">
+                {item.watched && <span className="chip chip-good">Matches a topic you watch</span>}
+                {item.important && !item.watched && <span className="chip chip-good">Important (your rule)</span>}
+                {item.quiet && <span className="chip">Quiet (your rule)</span>}
+              </span>
+            )}
             {(item.asks_question || item.mentions_deadline) && (
               <span className="chips">
                 {item.asks_question && <span className="chip">Asks a question</span>}
@@ -2771,7 +3118,7 @@ function Email({ onTaskAdded }: { onTaskAdded: () => void }) {
             <span className="email-actions">
               <a
                 className="btn ghost small"
-                href={`https://mail.google.com/mail/u/0/#inbox/${item.id}`}
+                href={`https://mail.google.com/mail/u/${item.account ? encodeURIComponent(item.account) : '0'}/#inbox/${item.id}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={() => void recordSignal(item, 'acted')}

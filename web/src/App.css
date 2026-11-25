@@ -1069,3 +1069,27 @@ a.btn {
     animation: none !important;
   }
 }
+
+.learning {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.suggestion {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.chip-good {
+  color: #15803d;
+  border-color: #15803d;
+}
+
+.rule-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
